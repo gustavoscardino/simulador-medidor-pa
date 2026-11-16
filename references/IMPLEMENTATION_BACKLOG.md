@@ -94,7 +94,7 @@ This backlog captures issues reported during a walkthrough of the current single
 
 **Acceptance:** Try the candidate gestures on the physical headset for dialogue, panel controls, and object manipulation. Select and document the supported gesture for each action, including any accessibility or tracking limitations, then verify acquisition, release, and accidental activation behavior.
 
-**Implementation (2026-11-09):** Fixed a hand-tracking early return that disabled all clinical hand interactions when the prototype `box` mesh was absent. The stethoscope now uses a whole-hand grab: closing three tracked fingers near it picks it up, and opening the hand releases it. The relaxed pinch thresholds remain for the prototype box; ray/cursor selection of scene targets and panels still uses its separate path. Physical-headset retest is pending, including false grabs, release reliability, and controls that still require pinch selection.
+**Implementation (2026-11-09):** Fixed a hand-tracking early return that disabled all clinical hand interactions when the prototype `box` mesh was absent. The stethoscope uses a whole-hand grab: closing three tracked fingers near it picks it up, and opening the hand releases it. Closing the hand near the currently required scene target now activates that physical action without requiring the ray dot to land precisely on the mesh. XR slate/panel controls still use ray selection; inflation and deflation controls remain explicit buttons. The relaxed pinch thresholds remain for the prototype box. Physical-headset retest is pending, including false grabs, proximity activation accuracy, release reliability, and controls that still require ray selection.
 
 ### B10. Review placement of scene equipment and panels
 

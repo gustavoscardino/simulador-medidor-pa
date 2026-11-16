@@ -205,7 +205,8 @@ export class App {
 			this._interactionManager = new InteractionManager(this._scene, this);
 			this._xr?.setStethoscopeInteractionHandlers(
 				() => this._interactionManager?.canGrabStethoscope() ?? false,
-				position => this._interactionManager?.handleStethoscopeRelease(position) ?? false
+				position => this._interactionManager?.handleStethoscopeRelease(position) ?? false,
+				position => this._interactionManager?.handleHandGrabInteraction(position) ?? false
 			);
 			this._engine.runRenderLoop(() => {
 				const now = this.getSimulatedTime();

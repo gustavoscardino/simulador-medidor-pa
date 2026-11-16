@@ -12,15 +12,18 @@ import type { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 export default class XR {
     private _canGrabStethoscope: (() => boolean) | null = null;
     private _onStethoscopeRelease: ((position: Vector3) => boolean) | null = null;
+    private _onHandGrab: ((position: Vector3) => boolean) | null = null;
 
     public constructor(public scene: Scene) {}
 
     public setStethoscopeInteractionHandlers(
         canGrab: () => boolean,
-        onRelease: (position: Vector3) => boolean
+        onRelease: (position: Vector3) => boolean,
+        onHandGrab: (position: Vector3) => boolean
     ): void {
         this._canGrabStethoscope = canGrab;
         this._onStethoscopeRelease = onRelease;
+        this._onHandGrab = onHandGrab;
     }
 
     public async onStart(): Promise<void> {
@@ -189,6 +192,7 @@ export default class XR {
                     if (!wasFistGrabbing && fistGrab) {
                         wasFistGrabbing = true;
                         const stethoscope = this.scene.getTransformNodeByName("stethoscope-root");
+                        let pickedUpStethoscope = false;
                         if (stethoscope && wrist && stethoscopeHand === null && grabbingHand === null && this._canGrabStethoscope?.()) {
                             stethoscope.computeWorldMatrix(true);
                             const bounds = stethoscope.getHierarchyBoundingVectors(true);
@@ -200,7 +204,11 @@ export default class XR {
                                 stethoscopeOriginalPosition = stethoscope.getAbsolutePosition().clone();
                                 stethoscopeHand = handedness;
                                 stethoscope.setParent(wrist, true);
+                                pickedUpStethoscope = true;
                             }
+                        }
+                        if (!pickedUpStethoscope && wrist) {
+                            this._onHandGrab?.(wrist.getAbsolutePosition());
                         }
                     } else if (wasFistGrabbing && fistRelease) {
                         wasFistGrabbing = false;

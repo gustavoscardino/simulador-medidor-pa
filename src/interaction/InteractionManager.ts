@@ -876,6 +876,23 @@ export class InteractionManager {
 		return action?.type === "earpieces-placed";
 	}
 
+	public handleHandGrabInteraction(position: Vector3): boolean {
+		const action = this._app.getCurrentSimulationAction();
+		if (!action || action.type === "earpieces-placed"
+			|| action.rule === "inflate" || action.rule === "inflate-stop" || action.rule === "deflation") return false;
+
+		const targetPosition = this._resolveTargetPosition(action.target, action.type);
+		if (Vector3.Distance(position, targetPosition) > 0.45) return false;
+
+		const targetMesh = this._scene.meshes.find(mesh =>
+			(mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name)) === action.target
+			&& mesh.isPickable
+		);
+		if (!targetMesh) return false;
+
+		return this.handleMeshInteraction(targetMesh);
+	}
+
 	public handleStethoscopeRelease(position: Vector3): boolean {
 		const action = this._app.getCurrentSimulationAction();
 		if (!action || !this.canGrabStethoscope()) return false;
