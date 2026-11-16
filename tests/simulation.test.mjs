@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 // Compile only the framework-free engine; no browser, XR runtime, or new dependencies.
 const output = mkdtempSync(join(tmpdir(), "bp-simulation-"));
 after(() => rmSync(output, { recursive: true, force: true }));
-execFileSync(process.execPath, ["node_modules/typescript/bin/tsc", "--ignoreConfig", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "--strict", "--skipLibCheck", "--outDir", output, "src/simulation/mockRunner.ts"], { stdio: "inherit" });
+execFileSync(process.execPath, ["node_modules/typescript/bin/tsc", "--ignoreConfig", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "--strict", "--skipLibCheck", "--outDir", output, "src/simulation/mockRunner.ts", "src/simulation/debrief.ts"], { stdio: "inherit" });
 writeFileSync(join(output, "package.json"), '{"type":"module"}');
 const load = (file) => import(pathToFileURL(join(output, file)).href);
 const { SimulationController } = await load("SimulationController.js");
@@ -17,6 +17,7 @@ const { defaultConfig, auscultatoryScenario } = await load("auscultatoryScenario
 const { eligibleCuffs, cuffs, clinicalParameters, pdfSource, supportingContent } = await load("clinicalParameters.js");
 const { MockClock, nextMockEvent, runMockScenario } = await load("mockRunner.js");
 const { patientCases } = await load("patientCases.js");
+const { buildDebrief } = await load("debrief.js");
 
 test("condition types reject missing expectations, unused expectations and unknown rules", () => {
 	execFileSync(process.execPath, ["node_modules/typescript/bin/tsc", "--ignoreConfig", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "--strict", "--skipLibCheck", "--noEmit", "tests/actionConditions.typecheck.ts"], { stdio: "inherit" });
@@ -274,4 +275,47 @@ test("snapshot and input mutation cannot alter session state", () => {
 	snapshot.steps["initial-hand-hygiene"].status = "completed";
 	assert.equal(controller.getSnapshot().steps["initial-hand-hygiene"].status, "active");
 	assert.equal(controller.getSnapshot().config.patient.name, defaultConfig.patient.name);
+});
+
+function finish(context) {
+	for (let count = 0; !context.controller.getSnapshot().completed; count++) {
+		assert.ok(count < 200, "Could not finish the scenario");
+		assert.equal(context.controller.dispatch(nextMockEvent(context.controller, context.clock)).accepted, true);
+	}
+	return context.controller.getSnapshot();
+}
+test("debrief gives full procedure credit and reports the readings when no attempt was rejected", () => {
+	const report = buildDebrief(finish(setup()));
+	assert.equal(report.physicalScore, 100);
+	assert.equal(report.flawlessStepCount, report.physicalStepCount);
+	assert.ok(report.physicalStepCount > 0);
+	assert.deepEqual(report.stepsWithErrors, []);
+	assert.equal(report.readings.recordedSystolic, defaultConfig.pressure.systolic);
+	assert.equal(report.readings.recordedDiastolic, defaultConfig.pressure.diastolic);
+	assert.equal(report.readings.referenceSystolic, defaultConfig.pressure.systolic);
+});
+test("debrief deducts rejected attempts from the step where they happened", () => {
+	const context = setup();
+	until(context, "pulse-reappearance-recorded");
+	assert.equal(context.controller.dispatch({ type: "pulse-reappearance-recorded", target: "gauge", value: 999 }).accepted, false);
+	const report = buildDebrief(finish(context));
+	assert.deepEqual(report.stepsWithErrors.map(step => [step.stepId, step.checklistNumber, step.errors]), [["estimate-systolic", 14, 1]]);
+	assert.ok(report.stepsWithErrors[0].lastFeedback.length > 0);
+	assert.ok(report.physicalScore < 100);
+	assert.equal(report.flawlessStepCount, report.physicalStepCount - 1);
+});
+test("debrief scores communication from omission and timing", () => {
+	const omitted = buildDebrief(finish(setup()));
+	assert.equal(omitted.communicationScore, 0);
+	assert.equal(omitted.totalScore, Math.round(omitted.physicalScore * 0.5));
+
+	const controller = new SimulationController(defaultConfig, new MockClock().now, true);
+	controller.dispatchLateralDialogue("identify-patient");
+	controller.dispatchLateralDialogue("check-readiness");
+	controller.dispatchLateralDialogue("explain-and-rest");
+	controller.dispatchLateralDialogue("inform-patient");
+	const report = buildDebrief(controller.getSnapshot());
+	// Results were communicated before auscultation, so only that topic is mistimed.
+	assert.deepEqual(report.communication.map(record => record.timing), ["ideal", "ideal", "ideal", "early"]);
+	assert.equal(report.communicationScore, 90);
 });

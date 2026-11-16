@@ -47,6 +47,9 @@ export interface StepDefinition {
 	source: string;
 }
 
+/** "tutorial" shows the next step and target; "evaluation" hides them. */
+export type GuidanceMode = "tutorial" | "evaluation";
+
 export interface ScenarioConfig {
 	patient: { name: string; dateOfBirth: string; armCircumferenceCm: number };
 	pressure: { systolic: number; diastolic: number };

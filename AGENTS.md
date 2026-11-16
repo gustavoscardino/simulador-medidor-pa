@@ -20,11 +20,15 @@ Before implementing a backlog item, read its observed issue, expected behavior, 
 
 This project uses TypeScript, Vite, Babylon.js, and Havok for an interactive WebXR scene.
 - `src/main.ts` initializes `App`; `src/App.ts` configures rendering, physics, and scene loading.
-- `src/scripts/xr.ts` handles hand tracking and pinch interactions; `src/scripts/box.ts` controls box rotation.
+- `src/App.ts` composes the clinical room at runtime from the GLBs in `assets/Models`; it does not load an Editor scene export.
+- `src/scene/clinicalLayout.ts` is the single source for room bounds, stations, teleport points, spawn, arm anchors and item positions. Change layout values there, not in scene code.
+- `src/scripts/xr.ts` handles WebXR setup, teleportation, hand tracking and the hand-grab interactions.
+- `src/interaction/` connects the simulation to the scene: `InteractionManager.ts` (guidance, panels, dialogue, scene picking), `SimulationAudio.ts` (chimes and Korotkoff sounds) and `debriefView.ts` (final report markup).
+- `src/simulation/` is the framework-free scenario engine; `debrief.ts` computes the formative score from the session's attempts.
 - `src/scripts.ts` is the Babylon.js Editor-generated script registry. Keep registrations consistent with scene scripts.
 - `src/style.css` and `index.html` define the page and canvas.
 - `assets/` contains editable scene data, materials, and textures; `project.bjseditor` is the Editor project configuration.
-- `public/scene/` contains exported runtime assets, including `example.babylon`. No test directory currently exists.
+- `tests/` holds the engine tests (`npm test`) and an optional browser integration check (`tests/menu.browser.mjs`).
 
 ## Build, Test, and Development Commands
 
@@ -47,7 +51,7 @@ Use TypeScript ES modules, PascalCase class names, and camelCase methods and var
 
 ## Testing Guidelines
 
-There is no automated test framework, test naming convention, or coverage threshold. Run type checking and a production build for code changes. Manually verify scene loading, resizing, and console errors. For interaction changes, check both hands, pinch acquisition, exclusive box ownership, release position, and rotation on compatible XR hardware. Report hardware and browser used, and any untested behavior.
+Run `npm test` (Node's built-in runner, scenario engine and debrief scoring), type checking and a production build for code changes. `node tests/menu.browser.mjs` drives a running Vite server through an isolated Chrome with `--remote-debugging-port=9223`. Manually verify scene loading, resizing, and console errors. For interaction changes, check both hands, grab acquisition and release, and teleportation on compatible XR hardware. Report hardware and browser used, and any untested behavior.
 
 ## Commit & Pull Request Guidelines
 

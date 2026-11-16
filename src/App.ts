@@ -19,6 +19,7 @@ import { HavokPlugin } from "@babylonjs/core/Physics/v2/Plugins/havokPlugin";
 import XR from "./scripts/xr";
 import { buildCuffSet } from "./scene/buildCuffSet";
 import { raiseChairArmrest, posePatientRightArm } from "./scene/adjustChairAndPatientArm";
+import { clinicalLayout, teleportFloorBounds, type StationId } from "./scene/clinicalLayout";
 
 // Bundle source models independently of the Editor-managed public/scene export.
 const clinicalModelUrls = {
@@ -79,12 +80,8 @@ import "@babylonjs/core/XR/features/WebXRHandTracking";
 
 import "@babylonjs/loaders/glTF";
 
-
-import { loadScene } from "babylonjs-editor-tools";
-
-import { scriptsMap } from "./scripts";
 import { SimulationController } from "./simulation/SimulationController";
-import type { InteractionEvent, ScenarioConfig, SessionState } from "./simulation/types";
+import type { GuidanceMode, InteractionEvent, ScenarioConfig, SessionState } from "./simulation/types";
 import { StartMenu } from "./ui/StartMenu";
 import { InteractionManager } from "./interaction/InteractionManager";
 
@@ -96,6 +93,7 @@ export class App {
 	private _interactionManager: InteractionManager | null = null;
 	private _xr: XR | null = null;
 	private _simulatedOffsetMs = 0;
+	private _guidanceMode: GuidanceMode = "tutorial";
 	private _menu: StartMenu | null = null;
 	private _loading = false;
 	private _disposed = false;
@@ -116,7 +114,7 @@ export class App {
 		const root = document.getElementById("interface");
 		if (!root) throw new Error("Interface element not found");
 		this._menu = new StartMenu(root, this._canvas, {
-			start: config => this.startSimulation(config),
+			start: (config, mode) => this.startSimulation(config, mode),
 			restart: () => this.restartSimulation(),
 			back: () => this.returnToMenu(),
 			moveToStation: station => this.moveToStation(station),
@@ -180,10 +178,15 @@ export class App {
 		return this._simulation?.getCommunicationEvaluation() ?? [];
 	}
 
-	public async startSimulation(config: ScenarioConfig): Promise<void> {
+	public getGuidanceMode(): GuidanceMode {
+		return this._guidanceMode;
+	}
+
+	public async startSimulation(config: ScenarioConfig, mode: GuidanceMode = this._guidanceMode): Promise<void> {
 		if (this._loading || this._disposed) throw new Error("A sessão não pode ser iniciada agora.");
 		this._loading = true;
 		this._clearSession();
+		this._guidanceMode = mode;
 		try {
 			this._simulatedOffsetMs = 0;
 			const simulation = new SimulationController(config, () => this.getSimulatedTime(), true);
@@ -286,7 +289,7 @@ export class App {
 			}
 			gltfRoot.dispose();
 		}
-		officeRoot.scaling.scaleInPlace(2.4);
+		officeRoot.scaling.scaleInPlace(clinicalLayout.officeScale);
 
 		// Enable collisions on room shell, counter, and table
 		const officeShell = scene.getMeshByName("DoctorsOffice_blinn1_0") as Mesh | null;
@@ -337,26 +340,27 @@ export class App {
 			return wall;
 		};
 
-		// Wall at +X (x = 2.28) enclosing the right open cutaway next to the counter
+		const room = clinicalLayout.room;
+		// Wall at +X enclosing the right open cutaway next to the counter
 		createWall(
 			"office-wall-right",
-			new Vector3(2.28, 0, 2.40),
-			new Vector3(2.28, 0, -2.52),
-			new Vector3(2.28, 2.88, -2.52),
-			new Vector3(2.28, 2.88, 2.40),
+			new Vector3(room.maxX, 0, room.maxZ),
+			new Vector3(room.maxX, 0, room.minZ),
+			new Vector3(room.maxX, room.height, room.minZ),
+			new Vector3(room.maxX, room.height, room.maxZ),
 			[0.774, 0.370],
 			[0.385, 0.370],
 			[0.385, 0.614],
 			[0.774, 0.614]
 		);
 
-		// Wall at +Z (z = 2.40) enclosing the front open cutaway of the room
+		// Wall at +Z enclosing the front open cutaway of the room
 		createWall(
 			"office-wall-front",
-			new Vector3(-2.45, 0, 2.40),
-			new Vector3(2.28, 0, 2.40),
-			new Vector3(2.28, 2.88, 2.40),
-			new Vector3(-2.45, 2.88, 2.40),
+			new Vector3(room.minX, 0, room.maxZ),
+			new Vector3(room.maxX, 0, room.maxZ),
+			new Vector3(room.maxX, room.height, room.maxZ),
+			new Vector3(room.minX, room.height, room.maxZ),
 			[0.385, 0.370],
 			[0.001, 0.370],
 			[0.001, 0.614],
@@ -383,9 +387,9 @@ export class App {
 		const chair = await this._loadModel(
 			"hospital_examination_and_treatment_chair.glb",
 			"treatment-chair-root",
-			0.035,
-			new Vector3(-1.15, 0.02, -1.25),
-			Math.PI / 2,
+			clinicalLayout.chair.scale,
+			Vector3.FromArray(clinicalLayout.chair.position),
+			clinicalLayout.chair.rotationY,
 			"chair"
 		);
 
@@ -413,9 +417,9 @@ export class App {
 		const patient = await this._loadModel(
 			"sitting_mannequin.glb",
 			"patient-root",
-			1.0,
-			new Vector3(-1.04, 0.332, -1.095),
-			Math.PI / 2,
+			clinicalLayout.patient.scale,
+			Vector3.FromArray(clinicalLayout.patient.position),
+			clinicalLayout.patient.rotationY,
 			"patient"
 		);
 		posePatientRightArm(patient);
@@ -456,9 +460,10 @@ export class App {
 			"sanitizer"
 		);
 
-		this._placeModelOnSurface(sphygmo, new Vector3(-2.04, trayTopY, -0.88), "gauge");
-		this._placeModelOnSurface(stethoscope, new Vector3(-2.04, trayTopY, -1.17), "stethoscope");
-		this._placeModelOnSurface(sanitizer, new Vector3(-2.04, desktopY, -0.62), "hygiene-station");
+		const desk = clinicalLayout.desk;
+		this._placeModelOnSurface(sphygmo, new Vector3(desk.x, trayTopY, desk.sphygmomanometerZ), "gauge");
+		this._placeModelOnSurface(stethoscope, new Vector3(desk.x, trayTopY, desk.stethoscopeZ), "stethoscope");
+		this._placeModelOnSurface(sanitizer, new Vector3(desk.x, desktopY, desk.sanitizerZ), "hygiene-station");
 
 		// Ground plane for WebXR floor teleportation
 		const ground = CreateGround("ground", { width: 10, height: 10 }, scene);
@@ -469,20 +474,28 @@ export class App {
 		// Teleport only onto the room interior, never walls, ceiling or the oversized ground.
 		officeShell?.computeWorldMatrix(true);
 		const floorY = officeShell?.getBoundingInfo().boundingBox.minimumWorld.y ?? 0;
-		const teleportFloor = CreateGround("teleport-floor", { width: 4.33, height: 4.52 }, scene);
-		teleportFloor.position.set(-0.085, floorY + 0.005, -0.06);
+		const teleportArea = teleportFloorBounds();
+		const teleportFloor = CreateGround("teleport-floor", {
+			width: teleportArea.maxX - teleportArea.minX,
+			height: teleportArea.maxZ - teleportArea.minZ,
+		}, scene);
+		teleportFloor.position.set(
+			(teleportArea.minX + teleportArea.maxX) / 2,
+			floorY + 0.005,
+			(teleportArea.minZ + teleportArea.maxZ) / 2
+		);
 		teleportFloor.visibility = 0;
 		teleportFloor.isPickable = false;
 
 		// Invisible collision / test fixtures for test compatibility
 		const wallSide = CreateBox("wall-side-1", { width: 0.1, height: 3, depth: 5 }, scene);
-		wallSide.position.set(2.28, 1.5, 0);
+		wallSide.position.set(room.maxX, 1.5, 0);
 		wallSide.checkCollisions = true;
 		wallSide.visibility = 0;
 		wallSide.isPickable = false;
 
-		const tray = CreateBox("tray", { width: 0.33, height: 0.02, depth: 0.62 }, scene);
-		tray.position.set(-2.04, desktopY + 0.01, -1.04);
+		const tray = CreateBox("tray", { width: desk.traySize.width, height: 0.02, depth: desk.traySize.depth }, scene);
+		tray.position.set(desk.x, desktopY + 0.01, desk.trayZ);
 		tray.metadata = { assetId: "tray", logicalTarget: "tray" };
 		const trayMat = new PBRMaterial("tray-material", scene);
 		trayMat.albedoColor = new Color3(0.92, 0.94, 0.96);
@@ -492,25 +505,25 @@ export class App {
 		tray.isPickable = true;
 
 		const armL = CreateSphere("patient-forearm-esquerdo", { diameter: 0.15 }, scene);
-		armL.position.set(-0.85, 0.85, -0.95);
+		armL.position.fromArray(clinicalLayout.anchors.forearm.esquerdo);
 		armL.visibility = 0;
 		armL.isPickable = true;
 		armL.metadata = { assetId: "patient-forearm-esquerdo", logicalTarget: "patient-arm", arm: "esquerdo" };
 
 		const armR = CreateSphere("patient-forearm-direito", { diameter: 0.15 }, scene);
-		armR.position.set(-0.98, 1.085, -1.50);
+		armR.position.fromArray(clinicalLayout.anchors.forearm.direito);
 		armR.visibility = 0;
 		armR.isPickable = true;
 		armR.metadata = { assetId: "patient-forearm-direito", logicalTarget: "patient-arm", arm: "direito" };
 
 		const wristL = CreateSphere("patient-wrist-esquerdo", { diameter: 0.12 }, scene);
-		wristL.position.set(-0.85, 0.85, -0.72);
+		wristL.position.fromArray(clinicalLayout.anchors.wrist.esquerdo);
 		wristL.visibility = 0;
 		wristL.isPickable = true;
 		wristL.metadata = { assetId: "patient-wrist-esquerdo", logicalTarget: "patient-wrist", arm: "esquerdo" };
 
 		const wristR = CreateSphere("patient-wrist-direito", { diameter: 0.12 }, scene);
-		wristR.position.set(-0.98, 1.085, -1.72);
+		wristR.position.fromArray(clinicalLayout.anchors.wrist.direito);
 		wristR.visibility = 0;
 		wristR.isPickable = true;
 		wristR.metadata = { assetId: "patient-wrist-direito", logicalTarget: "patient-wrist", arm: "direito" };
@@ -538,8 +551,8 @@ export class App {
 		cuffSleeve.material = cuffMaterial;
 
 		// Camera placed in the center of the doctor's office
-		const camera = new UniversalCamera("clinical-camera", new Vector3(0, 1.6, 0.5), scene);
-		camera.setTarget(new Vector3(0, 1.1, -1.8));
+		const camera = new UniversalCamera("clinical-camera", Vector3.FromArray(clinicalLayout.spawn.position), scene);
+		camera.setTarget(Vector3.FromArray(clinicalLayout.spawn.lookAt));
 		camera.speed = 0.45;
 		camera.inertia = 0.25;
 		camera.minZ = 0.025;
@@ -572,18 +585,18 @@ export class App {
 				units: "meters",
 				status: "glb-room",
 				anchors: [
-					{ name: "hygiene-station", position: [-2.04, desktopY + 0.12, -0.62], logicalTarget: "hygiene-station" },
-					{ name: "soap-dispenser", position: [0.792, 1.272, -2.391], logicalTarget: "hygiene-station" },
-					{ name: "record", position: [-0.072, 0.88, -1.824], logicalTarget: "record" },
-					{ name: "table", position: [-2.04, desktopY, -0.96], logicalTarget: "table" },
+					{ name: "hygiene-station", position: [desk.x, desktopY + 0.12, desk.sanitizerZ], logicalTarget: "hygiene-station" },
+					{ name: "soap-dispenser", position: clinicalLayout.soapDispenser, logicalTarget: "hygiene-station" },
+					{ name: "record", position: clinicalLayout.record, logicalTarget: "record" },
+					{ name: "table", position: [desk.x, desktopY, -0.96], logicalTarget: "table" },
 					{ name: "treatment-chair", position: [-1.00, 0.72, -1.10], logicalTarget: "patient" },
 					{ name: "tray", position: tray.position.asArray(), logicalTarget: "tray" },
-					{ name: "sphygmomanometer", position: [-2.04, trayTopY, -0.88], logicalTarget: "gauge" },
-					{ name: "sanitizer", position: [-2.04, desktopY, -0.62], logicalTarget: "hygiene-station" },
-					{ name: "stethoscope", position: [-2.04, trayTopY, -1.17], logicalTarget: "stethoscope" },
+					{ name: "sphygmomanometer", position: [desk.x, trayTopY, desk.sphygmomanometerZ], logicalTarget: "gauge" },
+					{ name: "sanitizer", position: [desk.x, desktopY, desk.sanitizerZ], logicalTarget: "hygiene-station" },
+					{ name: "stethoscope", position: [desk.x, trayTopY, desk.stethoscopeZ], logicalTarget: "stethoscope" },
 					{ name: "patient-arm", position: selectedArmAnchor.position.asArray(), logicalTarget: "patient-arm" },
 					{ name: "patient-wrist", position: selectedWristAnchor.position.asArray(), logicalTarget: "patient-wrist" },
-					{ name: "cuffs", position: [-1.15, 0.85, -1.75], logicalTarget: "cuffs" },
+					{ name: "cuffs", position: clinicalLayout.cuffTray, logicalTarget: "cuffs" },
 				],
 			},
 			scripts: [{ enabled: true, key: "scripts/xr.ts", _id: "clinical-room-xr", debugOnly: false }],
@@ -643,24 +656,14 @@ export class App {
 		return rootNode;
 	}
 
-	public moveToStation(station: "overview" | "hygiene" | "prontuario" | "mesa" | "cadeira" | "esquerdo" | "direito"): void {
+	public moveToStation(station: StationId): void {
 		if (!this._scene) return;
 		const camera = this._scene.activeCamera;
-		if (!camera) return;
-		const targets: Record<string, { pos: [number, number, number]; lookAt: [number, number, number] }> = {
-			overview: { pos: [0, 1.6, 0.5], lookAt: [0, 1.1, -1.8] },
-			hygiene: { pos: [0.79, 1.6, -1.5], lookAt: [0.79, 1.27, -2.39] },
-			prontuario: { pos: [-0.07, 1.6, -1.2], lookAt: [-0.07, 0.88, -1.82] },
-			mesa: { pos: [-1.50, 1.60, -0.50], lookAt: [-2.04, 1.0, -1.0] },
-			cadeira: { pos: [-0.20, 1.70, -0.35], lookAt: [-1.00, 1.00, -1.15] },
-			esquerdo: { pos: [0.05, 1.60, -0.55], lookAt: [-0.85, 0.85, -0.95] },
-			direito: { pos: [-0.18, 1.60, -1.82], lookAt: [-0.98, 1.085, -1.50] },
-		};
-		const target = targets[station];
-		if (!target) return;
+		const target = clinicalLayout.stations[station];
+		if (!camera || !target) return;
 		if (camera instanceof UniversalCamera) {
-			camera.position.set(...target.pos);
-			camera.setTarget(new Vector3(...target.lookAt));
+			camera.position.fromArray(target.position);
+			camera.setTarget(Vector3.FromArray(target.lookAt));
 		}
 	}
 

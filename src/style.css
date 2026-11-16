@@ -154,6 +154,14 @@ select { width: 100%; padding: 14px 16px; border: 1px solid #bdcbc0; background:
 	color: #51685e;
 }
 
+.step-action-progress {
+	margin: 0;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	color: #1b5947;
+}
+
 .step-actions-row {
 	display: flex;
 	gap: 8px;

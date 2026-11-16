@@ -2,6 +2,8 @@
 
 Implementation-plan stages **3.1 and 3.2**. This is the first spatial draft; detailed assets and clinical interactions remain in subsequent stages.
 
+> **Historical (2026-11-16):** the procedural blockout described here, its generator (`npm run room:generate`), `src/scene/clinicalRoomSpec.ts`, `src/scene/buildClinicalRoom.ts`, `assets/clinical-room*` and `public/scene/` were removed; the runtime room is composed from GLBs in `src/App.ts` with positions in `src/scene/clinicalLayout.ts`. The palette, scale and orientation conventions below still apply. Recover the removed files from Git history if needed.
+
 ## Editable Sources and Regeneration
 
 - `src/scene/clinicalRoomSpec.ts`: dimensions, initial positions, palette, budgets, and complete asset inventory for stages 3.3–3.8. Cuff bladder dimensions come directly from the 2026 clinical parameters.

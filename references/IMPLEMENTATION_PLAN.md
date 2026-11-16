@@ -57,7 +57,7 @@ Implement the reference-inspired menu with the title, initial scenario, brief in
 
 ### 3. Assemble the Clinical Room
 
-Build this stage as small visual work packages. The initial procedural blockout has been superseded at runtime by GLB imports and procedural additions in `src/App.ts`; retain editable source assets and matching runtime assets in `public/scene/`, and do not describe the current room as a completed Editor export. Each package should include a screenshot from the learner's viewing position. Stages 3.3–3.4 have their initial integration complete, but placement corrections and detailed asset packages remain pending. Keep interaction logic, guidance UI, clinical validation, and measurement audio in stages 4–6; this stage prepares their visual assets and attachment points.
+Build this stage as small visual work packages. The initial procedural blockout has been superseded at runtime by GLB imports and procedural additions in `src/App.ts`, with all positions in `src/scene/clinicalLayout.ts`; the blockout scene, its generator and the `public/scene/` exports were removed on 2026-11-16 (see Git history), and the current room is not an Editor export. Each package should include a screenshot from the learner's viewing position. Stages 3.3–3.4 have their initial integration complete, but placement corrections and detailed asset packages remain pending. Keep interaction logic, guidance UI, clinical validation, and measurement audio in stages 4–6; this stage prepares their visual assets and attachment points.
 
 #### 3.1. Define the Asset Inventory and Visual Style ✓
 

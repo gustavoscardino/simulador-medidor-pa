@@ -8,6 +8,12 @@ export const labels = {
 	scenarioDescription: "Medição com manguito, estetoscópio e paciente sentado.",
 	patientLabel: "Paciente da sessão",
 	patientHint: "Casos fictícios para praticar diferentes situações de medição.",
+	modeLabel: "Modo de orientação",
+	modes: {
+		tutorial: "Com orientação (tutorial)",
+		evaluation: "Sem orientação (avaliação)",
+	},
+	modeHint: "Sem orientação, a seta e as instruções de cada passo ficam ocultas e cliques no alvo errado contam como erro no relatório.",
 	beforeStart: "Antes de começar",
 	instructions: [
 		{ title: "Escolha um paciente", text: "Cada caso tem suas próprias características de medição." },
