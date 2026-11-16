@@ -123,7 +123,7 @@ export class StartMenu {
 			if (restart && this._sessionActive) await this._actions.restart();
 			else await this._actions.start(selected.config, mode);
 			this._sessionActive = true;
-			this._element("#session-patient").textContent = `${selected.config.patient.name} • ${labels.modes[mode]}`;
+			this.showActiveSession(selected.config.patient.name, mode);
 			this._showSession(true);
 			status.textContent = "";
 			this._element("#session-title").focus();
@@ -144,6 +144,12 @@ export class StartMenu {
 
 	private _toggleControls(disabled: boolean): void {
 		this._root.querySelectorAll<HTMLButtonElement | HTMLSelectElement>("button, select").forEach(element => { element.disabled = disabled; });
+	}
+
+	/** Updates the session bar and keeps the menu's mode in sync with in-scene restarts. */
+	public showActiveSession(patientName: string, mode: GuidanceMode): void {
+		this._element("#session-patient").textContent = `${patientName} • ${labels.modes[mode]}`;
+		this._element<HTMLSelectElement>("#mode-select").value = mode;
 	}
 
 	private _showSession(active: boolean): void {

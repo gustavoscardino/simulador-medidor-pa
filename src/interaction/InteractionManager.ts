@@ -15,6 +15,7 @@ import type { Nullable } from "@babylonjs/core/types";
 import type { App } from "../App";
 import { clinicalLayout, type StationId } from "../scene/clinicalLayout";
 import { SimulationAudio } from "./SimulationAudio";
+import { RestartPanel } from "./RestartPanel";
 import { renderDebriefHtml, timingLabel } from "./debriefView";
 import { buildDebrief, type DebriefReport } from "../simulation/debrief";
 import { auscultatoryScenario } from "../simulation/auscultatoryScenario";
@@ -81,6 +82,7 @@ export class InteractionManager {
 	private _lastDialogueText: string | null = null;
 	private _disposed = false;
 	private _audio = new SimulationAudio();
+	private _restartPanel: RestartPanel | null = null;
 	private _pointerObserver: Nullable<Observer<PointerInfo>> = null;
 	private _renderObserver: Nullable<Observer<Scene>> = null;
 	private _feedbackTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -93,6 +95,9 @@ export class InteractionManager {
 		this._initXrPressureBoard();
 		this._initDialogueTrigger();
 		this._initGuidanceHUD();
+		// Defer the reset: it disposes this manager, which is still handling the pick.
+		this._restartPanel = new RestartPanel(scene, app.getGuidanceMode(),
+			mode => setTimeout(() => this._app.resetSession(mode), 0));
 		this._initPointerInteractions();
 		this._updateGuidance();
 	}
@@ -508,6 +513,7 @@ export class InteractionManager {
 	}
 
 	public handleMeshInteraction(mesh: Mesh): boolean {
+		if (this._restartPanel?.handlePick(mesh)) return true;
 		const logicalTarget = mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name);
 		if (logicalTarget === "dialogue-topic") {
 			if (!this._dialogueOpen) return false;
@@ -1571,5 +1577,7 @@ export class InteractionManager {
 		this._xrSlateRoot?.dispose();
 		this._xrSlateRoot = null;
 		this._audio.dispose();
+		this._restartPanel?.dispose();
+		this._restartPanel = null;
 	}
 }

@@ -8,6 +8,7 @@ import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
 import { SceneLoaderFlags } from "@babylonjs/core/Loading/sceneLoaderFlags";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
+import type { Node as SceneNode } from "@babylonjs/core/node";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { CreateGround } from "@babylonjs/core/Meshes/Builders/groundBuilder";
@@ -94,6 +95,8 @@ export class App {
 	private _xr: XR | null = null;
 	private _simulatedOffsetMs = 0;
 	private _guidanceMode: GuidanceMode = "tutorial";
+	/** Initial state of instruments that accepted actions move or hide. */
+	private _movableItems: { node: TransformNode; parent: SceneNode | null; position: Vector3; rotation: Vector3; enabled: boolean }[] = [];
 	private _menu: StartMenu | null = null;
 	private _loading = false;
 	private _disposed = false;
@@ -228,6 +231,27 @@ export class App {
 		}
 	}
 
+	/**
+	 * Restarts the session in place, keeping the loaded scene so an immersive
+	 * session continues. Used by the restart panel on the wall.
+	 */
+	public resetSession(mode: GuidanceMode = this._guidanceMode): void {
+		if (this._loading || !this._simulation || !this._scene) return;
+		const config = this._simulation.getSnapshot().config;
+		this._guidanceMode = mode;
+		this._simulatedOffsetMs = 0;
+		this._interactionManager?.dispose();
+		for (const item of this._movableItems) {
+			item.node.setParent(item.parent as TransformNode | null);
+			item.node.position.copyFrom(item.position);
+			item.node.rotation.copyFrom(item.rotation);
+			item.node.setEnabled(item.enabled);
+		}
+		this._simulation = new SimulationController(config, () => this.getSimulatedTime(), true);
+		this._interactionManager = new InteractionManager(this._scene, this);
+		this._menu?.showActiveSession(config.patient.name, mode);
+	}
+
 	public async restartSimulation(): Promise<void> {
 		const config = this._simulation?.getSnapshot().config;
 		if (!config) throw new Error("Nenhuma sessão ativa para reiniciar.");
@@ -244,6 +268,7 @@ export class App {
 		this._interactionManager?.dispose();
 		this._interactionManager = null;
 		this._xr = null;
+		this._movableItems = [];
 		this._simulatedOffsetMs = 0;
 		this._scene?.dispose();
 		this._scene = null;
@@ -601,6 +626,14 @@ export class App {
 			},
 			scripts: [{ enabled: true, key: "scripts/xr.ts", _id: "clinical-room-xr", debugOnly: false }],
 		};
+
+		this._movableItems = [sphygmo, stethoscope].map(node => ({
+			node,
+			parent: node.parent,
+			position: node.position.clone(),
+			rotation: node.rotation.clone(),
+			enabled: node.isEnabled(false),
+		}));
 
 		// Initialize WebXR (hand tracking, teleportation, motion controllers)
 		this._xr = new XR(scene);

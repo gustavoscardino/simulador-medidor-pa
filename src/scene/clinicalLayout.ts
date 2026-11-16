@@ -65,6 +65,8 @@ export const clinicalLayout = {
 	dialogueTrigger: [-0.8, 1.35, -1.15] as Vec3,
 	/** General XR guidance slate, offset from the wall behind the sanitizer. */
 	xrSlate: [-2.3, 1.85, -0.62] as Vec3,
+	/** Restart/mode panel on the empty front wall (+Z), facing into the room. */
+	restartPanel: [0, 1.45, 2.37] as Vec3,
 };
 
 /** Rectangle of the room floor that accepts XR teleportation. */
