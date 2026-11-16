@@ -5,11 +5,9 @@
 
 import { loadScene, scriptsDictionary, scriptAssetsCache, _applyScriptsForObject, _removeRegisteredScriptInstance, _preloadScriptsAssets } from "babylonjs-editor-tools";
 import * as scripts_xr from "./scripts/xr";
-import * as scripts_box from "./scripts/box";
 
 export const scriptsMap = {
     "scripts/xr.ts": scripts_xr,
-	"scripts/box.ts": scripts_box
 };
 
 export { loadScene, scriptsDictionary, scriptAssetsCache, _applyScriptsForObject, _removeRegisteredScriptInstance, _preloadScriptsAssets };

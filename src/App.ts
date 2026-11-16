@@ -1,5 +1,4 @@
 import { buildFittedCuff } from "./scene/buildFittedCuff";
-import { clinicalStations, patientStationOffset, supplyTableCenter, supplyPositions } from "./scene/workstationLayout";
 import { Scene } from "@babylonjs/core/scene";
 import { Engine } from "@babylonjs/core/Engines/engine";
 import { UniversalCamera } from "@babylonjs/core/Cameras/universalCamera";
@@ -10,6 +9,7 @@ import { Color3, Color4 } from "@babylonjs/core/Maths/math.color";
 import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
 import { SceneLoaderFlags } from "@babylonjs/core/Loading/sceneLoaderFlags";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
+import type { Node as SceneNode } from "@babylonjs/core/node";
 import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
 import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { CreateGround } from "@babylonjs/core/Meshes/Builders/groundBuilder";
@@ -20,6 +20,9 @@ import { HavokPlugin } from "@babylonjs/core/Physics/v2/Plugins/havokPlugin";
 import XR from "./scripts/xr";
 import { buildCuffSet } from "./scene/buildCuffSet";
 import { raiseChairArmrest, posePatientRightArm } from "./scene/adjustChairAndPatientArm";
+import { clinicalLayout, teleportFloorBounds, type StationId } from "./scene/clinicalLayout";
+
+const { patientStationOffset, supplyTableCenter, supplyPositions } = clinicalLayout;
 
 // Bundle source models independently of the Editor-managed public/scene export.
 const clinicalModelUrls = {
@@ -80,12 +83,8 @@ import "@babylonjs/core/XR/features/WebXRHandTracking";
 
 import "@babylonjs/loaders/glTF";
 
-
-import { loadScene } from "babylonjs-editor-tools";
-
-import { scriptsMap } from "./scripts";
 import { SimulationController } from "./simulation/SimulationController";
-import type { InteractionEvent, ScenarioConfig, SessionState } from "./simulation/types";
+import type { GuidanceMode, InteractionEvent, ScenarioConfig, SessionState } from "./simulation/types";
 import { StartMenu } from "./ui/StartMenu";
 import { InteractionManager } from "./interaction/InteractionManager";
 
@@ -97,6 +96,9 @@ export class App {
 	private _interactionManager: InteractionManager | null = null;
 	private _xr: XR | null = null;
 	private _simulatedOffsetMs = 0;
+	private _guidanceMode: GuidanceMode = "tutorial";
+	/** Initial state of instruments that accepted actions move or hide. */
+	private _movableItems: { node: TransformNode; parent: SceneNode | null; position: Vector3; rotation: Vector3; enabled: boolean }[] = [];
 	private _menu: StartMenu | null = null;
 	private _loading = false;
 	private _disposed = false;
@@ -117,7 +119,7 @@ export class App {
 		const root = document.getElementById("interface");
 		if (!root) throw new Error("Interface element not found");
 		this._menu = new StartMenu(root, this._canvas, {
-			start: config => this.startSimulation(config),
+			start: (config, mode) => this.startSimulation(config, mode),
 			restart: () => this.restartSimulation(),
 			back: () => this.returnToMenu(),
 			moveToStation: station => this.moveToStation(station),
@@ -181,10 +183,15 @@ export class App {
 		return this._simulation?.getCommunicationEvaluation() ?? [];
 	}
 
-	public async startSimulation(config: ScenarioConfig): Promise<void> {
+	public getGuidanceMode(): GuidanceMode {
+		return this._guidanceMode;
+	}
+
+	public async startSimulation(config: ScenarioConfig, mode: GuidanceMode = this._guidanceMode): Promise<void> {
 		if (this._loading || this._disposed) throw new Error("A sessão não pode ser iniciada agora.");
 		this._loading = true;
 		this._clearSession();
+		this._guidanceMode = mode;
 		try {
 			this._simulatedOffsetMs = 0;
 			const simulation = new SimulationController(config, () => this.getSimulatedTime(), true);
@@ -226,6 +233,27 @@ export class App {
 		}
 	}
 
+	/**
+	 * Restarts the session in place, keeping the loaded scene so an immersive
+	 * session continues. Used by the restart panel on the wall.
+	 */
+	public resetSession(mode: GuidanceMode = this._guidanceMode): void {
+		if (this._loading || !this._simulation || !this._scene) return;
+		const config = this._simulation.getSnapshot().config;
+		this._guidanceMode = mode;
+		this._simulatedOffsetMs = 0;
+		this._interactionManager?.dispose();
+		for (const item of this._movableItems) {
+			item.node.setParent(item.parent as TransformNode | null);
+			item.node.position.copyFrom(item.position);
+			item.node.rotation.copyFrom(item.rotation);
+			item.node.setEnabled(item.enabled);
+		}
+		this._simulation = new SimulationController(config, () => this.getSimulatedTime(), true);
+		this._interactionManager = new InteractionManager(this._scene, this);
+		this._menu?.showActiveSession(config.patient.name, mode);
+	}
+
 	public async restartSimulation(): Promise<void> {
 		const config = this._simulation?.getSnapshot().config;
 		if (!config) throw new Error("Nenhuma sessão ativa para reiniciar.");
@@ -242,6 +270,7 @@ export class App {
 		this._interactionManager?.dispose();
 		this._interactionManager = null;
 		this._xr = null;
+		this._movableItems = [];
 		this._simulatedOffsetMs = 0;
 		this._scene?.dispose();
 		this._scene = null;
@@ -287,7 +316,7 @@ export class App {
 			}
 			gltfRoot.dispose();
 		}
-		officeRoot.scaling.scaleInPlace(2.4);
+		officeRoot.scaling.scaleInPlace(clinicalLayout.officeScale);
 
 		// Enable collisions on room shell, counter, and table
 		const officeShell = scene.getMeshByName("DoctorsOffice_blinn1_0") as Mesh | null;
@@ -338,26 +367,27 @@ export class App {
 			return wall;
 		};
 
-		// Wall at +X (x = 2.28) enclosing the right open cutaway next to the counter
+		const room = clinicalLayout.room;
+		// Wall at +X enclosing the right open cutaway next to the counter
 		createWall(
 			"office-wall-right",
-			new Vector3(2.28, 0, 2.40),
-			new Vector3(2.28, 0, -2.52),
-			new Vector3(2.28, 2.88, -2.52),
-			new Vector3(2.28, 2.88, 2.40),
+			new Vector3(room.maxX, 0, room.maxZ),
+			new Vector3(room.maxX, 0, room.minZ),
+			new Vector3(room.maxX, room.height, room.minZ),
+			new Vector3(room.maxX, room.height, room.maxZ),
 			[0.774, 0.370],
 			[0.385, 0.370],
 			[0.385, 0.614],
 			[0.774, 0.614]
 		);
 
-		// Wall at +Z (z = 2.40) enclosing the front open cutaway of the room
+		// Wall at +Z enclosing the front open cutaway of the room
 		createWall(
 			"office-wall-front",
-			new Vector3(-2.45, 0, 2.40),
-			new Vector3(2.28, 0, 2.40),
-			new Vector3(2.28, 2.88, 2.40),
-			new Vector3(-2.45, 2.88, 2.40),
+			new Vector3(room.minX, 0, room.maxZ),
+			new Vector3(room.maxX, 0, room.maxZ),
+			new Vector3(room.maxX, room.height, room.maxZ),
+			new Vector3(room.minX, room.height, room.maxZ),
 			[0.385, 0.370],
 			[0.001, 0.370],
 			[0.001, 0.614],
@@ -384,9 +414,9 @@ export class App {
 		const chair = await this._loadModel(
 			"hospital_examination_and_treatment_chair.glb",
 			"treatment-chair-root",
-			0.035,
-			new Vector3(-1.15, 0.02, -1.25),
-			Math.PI / 2,
+			clinicalLayout.chair.scale,
+			Vector3.FromArray(clinicalLayout.chair.position),
+			clinicalLayout.chair.rotationY,
 			"chair"
 		);
 
@@ -414,9 +444,9 @@ export class App {
 		const patient = await this._loadModel(
 			"sitting_mannequin.glb",
 			"patient-root",
-			1.0,
-			new Vector3(-1.04, 0.332, -1.095),
-			Math.PI / 2,
+			clinicalLayout.patient.scale,
+			Vector3.FromArray(clinicalLayout.patient.position),
+			clinicalLayout.patient.rotationY,
 			"patient"
 		);
 		posePatientRightArm(patient);
@@ -480,20 +510,28 @@ export class App {
 		// Teleport only onto the room interior, never walls, ceiling or the oversized ground.
 		officeShell?.computeWorldMatrix(true);
 		const floorY = officeShell?.getBoundingInfo().boundingBox.minimumWorld.y ?? 0;
-		const teleportFloor = CreateGround("teleport-floor", { width: 4.33, height: 4.52 }, scene);
-		teleportFloor.position.set(-0.085, floorY + 0.005, -0.06);
+		const teleportArea = teleportFloorBounds();
+		const teleportFloor = CreateGround("teleport-floor", {
+			width: teleportArea.maxX - teleportArea.minX,
+			height: teleportArea.maxZ - teleportArea.minZ,
+		}, scene);
+		teleportFloor.position.set(
+			(teleportArea.minX + teleportArea.maxX) / 2,
+			floorY + 0.005,
+			(teleportArea.minZ + teleportArea.maxZ) / 2
+		);
 		teleportFloor.visibility = 0;
 		teleportFloor.isPickable = false;
 
 		// Invisible collision / test fixtures for test compatibility
 		const wallSide = CreateBox("wall-side-1", { width: 0.1, height: 3, depth: 5 }, scene);
-		wallSide.position.set(2.28, 1.5, 0);
+		wallSide.position.set(room.maxX, 1.5, 0);
 		wallSide.checkCollisions = true;
 		wallSide.visibility = 0;
 		wallSide.isPickable = false;
 
-		const tray = CreateBox("tray", { width: 0.53, height: 0.02, depth: 0.32 }, scene);
-		tray.position.set(-1.08, desktopY + 0.01, supplyTableCenter[1]);
+		const tray = CreateBox("tray", { width: clinicalLayout.supplyTray.width, height: 0.02, depth: clinicalLayout.supplyTray.depth }, scene);
+		tray.position.set(clinicalLayout.supplyTray.x, desktopY + 0.01, supplyTableCenter[1]);
 		tray.metadata = { assetId: "tray", logicalTarget: "tray" };
 		const trayMat = new PBRMaterial("tray-material", scene);
 		trayMat.albedoColor = new Color3(0.92, 0.94, 0.96);
@@ -503,25 +541,25 @@ export class App {
 		tray.isPickable = true;
 
 		const armL = CreateSphere("patient-forearm-esquerdo", { diameter: 0.15 }, scene);
-		armL.position.set(-0.85, 0.85, -0.95);
+		armL.position.fromArray(clinicalLayout.anchors.forearm.esquerdo);
 		armL.visibility = 0;
 		armL.isPickable = true;
 		armL.metadata = { assetId: "patient-forearm-esquerdo", logicalTarget: "patient-arm", arm: "esquerdo" };
 
 		const armR = CreateSphere("patient-forearm-direito", { diameter: 0.15 }, scene);
-		armR.position.set(-0.98, 1.085, -1.50);
+		armR.position.fromArray(clinicalLayout.anchors.forearm.direito);
 		armR.visibility = 0;
 		armR.isPickable = true;
 		armR.metadata = { assetId: "patient-forearm-direito", logicalTarget: "patient-arm", arm: "direito" };
 
 		const wristL = CreateSphere("patient-wrist-esquerdo", { diameter: 0.12 }, scene);
-		wristL.position.set(-0.85, 0.85, -0.72);
+		wristL.position.fromArray(clinicalLayout.anchors.wrist.esquerdo);
 		wristL.visibility = 0;
 		wristL.isPickable = true;
 		wristL.metadata = { assetId: "patient-wrist-esquerdo", logicalTarget: "patient-wrist", arm: "esquerdo" };
 
 		const wristR = CreateSphere("patient-wrist-direito", { diameter: 0.12 }, scene);
-		wristR.position.set(-0.98, 1.085, -1.72);
+		wristR.position.fromArray(clinicalLayout.anchors.wrist.direito);
 		wristR.visibility = 0;
 		wristR.isPickable = true;
 		wristR.metadata = { assetId: "patient-wrist-direito", logicalTarget: "patient-wrist", arm: "direito" };
@@ -546,8 +584,8 @@ export class App {
 		}
 
 		// Camera placed in the center of the doctor's office
-		const camera = new UniversalCamera("clinical-camera", new Vector3(...clinicalStations.direito.pos), scene);
-		camera.setTarget(new Vector3(...clinicalStations.direito.lookAt));
+		const camera = new UniversalCamera("clinical-camera", Vector3.FromArray(clinicalLayout.spawn.position), scene);
+		camera.setTarget(Vector3.FromArray(clinicalLayout.spawn.lookAt));
 		camera.speed = 0.45;
 		camera.inertia = 0.25;
 		camera.minZ = 0.025;
@@ -581,7 +619,7 @@ export class App {
 				status: "glb-room",
 				anchors: [
 					{ name: "hygiene-station", position: [supplyPositions.sanitizer[0], desktopY + 0.12, supplyPositions.sanitizer[1]], logicalTarget: "hygiene-station" },
-					{ name: "soap-dispenser", position: [0.792, 1.272, -2.391], logicalTarget: "hygiene-station" },
+					{ name: "soap-dispenser", position: clinicalLayout.soapDispenser, logicalTarget: "hygiene-station" },
 					{ name: "record", position: clipboard?.getAbsolutePosition().asArray() ?? [], logicalTarget: "record" },
 					{ name: "table", position: [supplyTableCenter[0], desktopY, supplyTableCenter[1]], logicalTarget: "table" },
 					{ name: "treatment-chair", position: patient.getAbsolutePosition().asArray(), logicalTarget: "patient" },
@@ -596,6 +634,14 @@ export class App {
 			},
 			scripts: [{ enabled: true, key: "scripts/xr.ts", _id: "clinical-room-xr", debugOnly: false }],
 		};
+
+		this._movableItems = [sphygmo, stethoscope].map(node => ({
+			node,
+			parent: node.parent,
+			position: node.position.clone(),
+			rotation: node.rotation.clone(),
+			enabled: node.isEnabled(false),
+		}));
 
 		// Initialize WebXR (hand tracking, teleportation, motion controllers)
 		this._xr = new XR(scene);
@@ -651,16 +697,14 @@ export class App {
 		return rootNode;
 	}
 
-	public moveToStation(station: "overview" | "hygiene" | "prontuario" | "mesa" | "cadeira" | "esquerdo" | "direito"): void {
+	public moveToStation(station: StationId): void {
 		if (!this._scene) return;
 		const camera = this._scene.activeCamera;
-		if (!camera) return;
-		const targets = clinicalStations;
-		const target = targets[station];
-		if (!target) return;
+		const target = clinicalLayout.stations[station];
+		if (!camera || !target) return;
 		if (camera instanceof UniversalCamera) {
-			camera.position.set(...target.pos);
-			camera.setTarget(new Vector3(...target.lookAt));
+			camera.position.fromArray(target.position);
+			camera.setTarget(Vector3.FromArray(target.lookAt));
 		}
 	}
 

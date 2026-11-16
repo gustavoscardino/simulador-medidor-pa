@@ -1,12 +1,13 @@
 import { patientCases } from "../simulation/patientCases.js";
-import type { ScenarioConfig } from "../simulation/types.js";
+import type { GuidanceMode, ScenarioConfig } from "../simulation/types.js";
 import { labels } from "./labels.js";
+import type { StationId } from "../scene/clinicalLayout.js";
 
 export interface MenuActions {
-	start(config: ScenarioConfig): Promise<void>;
+	start(config: ScenarioConfig, mode: GuidanceMode): Promise<void>;
 	restart(): Promise<void>;
 	back(): void;
-	moveToStation?(station: "overview" | "hygiene" | "prontuario" | "mesa" | "cadeira" | "esquerdo" | "direito"): void;
+	moveToStation?(station: StationId): void;
 }
 
 export class StartMenu {
@@ -39,6 +40,12 @@ export class StartMenu {
 						<label class="field-label" for="patient-select">${labels.patientLabel}</label>
 						<select id="patient-select" aria-describedby="patient-hint"></select>
 						<p id="patient-hint" class="field-hint">${labels.patientHint}</p>
+						<label class="field-label" for="mode-select">${labels.modeLabel}</label>
+						<select id="mode-select" aria-describedby="mode-hint">
+							<option value="tutorial">${labels.modes.tutorial}</option>
+							<option value="evaluation">${labels.modes.evaluation}</option>
+						</select>
+						<p id="mode-hint" class="field-hint">${labels.modeHint}</p>
 					</section>
 					<section class="panel instructions-panel" aria-labelledby="instructions-title">
 						<div class="section-heading"><span class="section-number" aria-hidden="true">02</span><h2 id="instructions-title">${labels.beforeStart}</h2></div>
@@ -112,10 +119,11 @@ export class StartMenu {
 		this._toggleControls(true);
 		try {
 			const selected = patientCases.find(patient => patient.id === this._element<HTMLSelectElement>("#patient-select").value)!;
+			const mode = this._element<HTMLSelectElement>("#mode-select").value as GuidanceMode;
 			if (restart && this._sessionActive) await this._actions.restart();
-			else await this._actions.start(selected.config);
+			else await this._actions.start(selected.config, mode);
 			this._sessionActive = true;
-			this._element("#session-patient").textContent = selected.config.patient.name;
+			this.showActiveSession(selected.config.patient.name, mode);
 			this._showSession(true);
 			status.textContent = "";
 			this._element("#session-title").focus();
@@ -136,6 +144,12 @@ export class StartMenu {
 
 	private _toggleControls(disabled: boolean): void {
 		this._root.querySelectorAll<HTMLButtonElement | HTMLSelectElement>("button, select").forEach(element => { element.disabled = disabled; });
+	}
+
+	/** Updates the session bar and keeps the menu's mode in sync with in-scene restarts. */
+	public showActiveSession(patientName: string, mode: GuidanceMode): void {
+		this._element("#session-patient").textContent = `${patientName} • ${labels.modes[mode]}`;
+		this._element<HTMLSelectElement>("#mode-select").value = mode;
 	}
 
 	private _showSession(active: boolean): void {

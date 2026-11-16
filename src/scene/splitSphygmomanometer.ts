@@ -9,6 +9,9 @@ import type { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 
 /** Split the existing asset's disconnected bulb/valve shells, preserving its UVs and transforms. */
 export function splitSphygmomanometer(root: TransformNode): Mesh[] {
+	// In-place XR resets reuse the scene and must not split already-cut geometry.
+	const existing = ["instrument-bulb", "instrument-valve"].map(name => root.getChildMeshes().find(mesh => mesh.name === name));
+	if (existing.every((mesh): mesh is Mesh => mesh instanceof Mesh)) return existing;
 	const source = root.getChildMeshes().find((mesh): mesh is Mesh => mesh instanceof Mesh && mesh.getTotalVertices() > 0);
 	const positions = source?.getVerticesData(VertexBuffer.PositionKind);
 	const indices = source?.getIndices();

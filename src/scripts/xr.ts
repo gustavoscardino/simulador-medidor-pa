@@ -1,4 +1,3 @@
-import { clinicalStations } from "../scene/workstationLayout";
 import { Scene } from "@babylonjs/core/scene";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { WebXRDefaultExperience } from "@babylonjs/core/XR/webXRDefaultExperience";
@@ -9,6 +8,7 @@ import { PointerEventTypes } from "@babylonjs/core/Events/pointerEvents";
 
 import { WebXRHandJoint, WebXRHandTracking } from "@babylonjs/core/XR/features/WebXRHandTracking";
 import type { TransformNode } from "@babylonjs/core/Meshes/transformNode";
+import { clinicalLayout, type Station } from "../scene/clinicalLayout";
 
 export default class XR {
     private _canGrabStethoscope: (() => boolean) | null = null;
@@ -29,7 +29,6 @@ export default class XR {
 
     public async onStart(): Promise<void> {
         const teleportFloor = this.scene.getMeshByName("teleport-floor");
-        const box = this.scene.getMeshByName("box");
 
         if (!teleportFloor) {
             console.error("XR: teleport floor not found");
@@ -73,8 +72,9 @@ export default class XR {
             }
 
             // Start at the shared preparation/measurement working position.
-            const initialSpawnPosition = new Vector3(clinicalStations.direito.pos[0], 0, clinicalStations.direito.pos[2]);
-            const initialTarget = new Vector3(...clinicalStations.direito.lookAt);
+            const [spawnX, , spawnZ] = clinicalLayout.spawn.position;
+            const initialSpawnPosition = new Vector3(spawnX, 0, spawnZ);
+            const initialTarget = Vector3.FromArray(clinicalLayout.spawn.lookAt);
 
             xr.baseExperience.onInitialXRPoseSetObservable.add((camera) => {
                 camera.position.copyFrom(initialSpawnPosition);
@@ -87,26 +87,27 @@ export default class XR {
                     // already added the user's height: keep it instead of using y = 0,
                     // which would put the eyes below the office floor.
                     const camera = xr.baseExperience.camera;
-                    const headHeight = camera.realWorldHeight || 1.6;
+                    const headHeight = camera.realWorldHeight || clinicalLayout.eyeHeight;
                     camera.position.set(
                         initialSpawnPosition.x,
                         teleportFloor.position.y + headHeight,
                         initialSpawnPosition.z
                     );
                     camera.setTarget(initialTarget);
-                    console.log("[XR spawn] posição inicial:", camera.position.asArray().map(value => value.toFixed(2)));
                 }
             });
 
             // Add snap points for the key clinical stations for teleportation
             if (xr.teleportation) {
                 const snapPoints = new Set<string>();
-                for (const station of Object.values(clinicalStations)) {
-                    const [x, , z] = station.pos;
-                    const key = `${x},${z}`;
-                    if (snapPoints.has(key)) continue;
-                    snapPoints.add(key);
-                    xr.teleportation.addSnapPoint(new Vector3(x, 0, z));
+                for (const station of Object.values(clinicalLayout.stations) as Station[]) {
+                    if (station.teleportPoint) {
+                        const [x, z] = station.teleportPoint;
+                        const key = `${x},${z}`;
+                        if (snapPoints.has(key)) continue;
+                        snapPoints.add(key);
+                        xr.teleportation.addSnapPoint(new Vector3(x, 0, z));
+                    }
                 }
                 this._fixHandTeleportation(xr);
             }
@@ -122,12 +123,7 @@ export default class XR {
 
             console.log("Hand tracking enabled:", handTracking);
 
-            // Box interaction is optional; hand tracking also drives clinical
-            // instrument interactions in scenes that do not contain the prototype box.
-            const originalParent = box?.parent ?? null;
-
-            // Only one hand can hold the box at a time.
-            let grabbingHand: string | null = null;
+            // Only one hand can hold the stethoscope at a time.
             let stethoscopeHand: string | null = null;
 
             handTracking.onHandAddedObservable.add((hand) => {
@@ -136,39 +132,12 @@ export default class XR {
 
                 console.log("Hand added:", handedness);
 
-                let wasPinching = false;
                 let wasFistGrabbing = false;
                 let grabbedStethoscope: TransformNode | null = null;
                 let stethoscopeOriginalParent: TransformNode | null = null;
                 let stethoscopeOriginalPosition: Vector3 | null = null;
 
-                // WebXR hand joints jitter at headset scale. Accept a relaxed
-                // pinch and keep a wider release threshold to avoid flicker.
-                const PINCH_START_DISTANCE = 0.045;
-                const PINCH_END_DISTANCE = 0.065;
-
                 this.scene.onBeforeRenderObservable.add(() => {
-                    const thumbTip =
-                        hand.getJointMesh(WebXRHandJoint.THUMB_TIP);
-
-                    const indexTip =
-                        hand.getJointMesh(WebXRHandJoint.INDEX_FINGER_TIP);
-
-                    if (!thumbTip || !indexTip) {
-                        return;
-                    }
-
-                    const thumbPosition =
-                        thumbTip.getAbsolutePosition();
-
-                    const indexPosition =
-                        indexTip.getAbsolutePosition();
-
-                    const fingerDistance = Vector3.Distance(
-                        thumbPosition,
-                        indexPosition
-                    );
-
                     const wrist = hand.getJointMesh(WebXRHandJoint.WRIST);
                     const fingerJoints = [
                         [WebXRHandJoint.INDEX_FINGER_TIP, WebXRHandJoint.INDEX_FINGER_PHALANX_PROXIMAL],
@@ -196,7 +165,7 @@ export default class XR {
                         wasFistGrabbing = true;
                         const stethoscope = this.scene.getTransformNodeByName("stethoscope-root");
                         let pickedUpStethoscope = false;
-                        if (stethoscope && wrist && stethoscopeHand === null && grabbingHand === null && this._canGrabStethoscope?.()) {
+                        if (stethoscope && wrist && stethoscopeHand === null && this._canGrabStethoscope?.()) {
                             stethoscope.computeWorldMatrix(true);
                             const bounds = stethoscope.getHierarchyBoundingVectors(true);
                             const center = bounds.min.add(bounds.max).scale(0.5);
@@ -236,119 +205,6 @@ export default class XR {
                         }
                     }
 
-                    /*
-                     * PINCH START
-                     */
-                    if (
-                        !wasPinching &&
-                        fingerDistance < PINCH_START_DISTANCE
-                    ) {
-                        wasPinching = true;
-
-                        console.log(
-                            "PINCH START:",
-                            handedness
-                        );
-
-                        // Don't allow both hands to hold the cube.
-                        if (grabbingHand !== null) {
-                            return;
-                        }
-
-                        // Position halfway between thumb and index.
-                        const pinchPosition = thumbPosition
-                            .add(indexPosition)
-                            .scale(0.5);
-
-                        if (box) {
-                            const boxPosition = box.getAbsolutePosition();
-
-                            const boxRadius = box.getBoundingInfo().boundingSphere.radiusWorld;
-
-                            const distanceToBox = Vector3.Distance(pinchPosition, boxPosition);
-
-                            console.log("GRAB CHECK", handedness, {
-                                pinchPosition,
-                                boxPosition,
-                                distanceToBox,
-                                boxRadius,
-                            });
-
-                            if (distanceToBox < boxRadius + 10) {
-                                grabbingHand = handedness;
-
-                                // Attach the cube directly to the index-finger joint.
-                                box.setParent(indexTip);
-
-                                console.log("BOX GRABBED:", handedness);
-                            }
-                        }
-                    }
-
-                    /*
-                     * PINCH END
-                     */
-                    if (
-                        wasPinching &&
-                        fingerDistance > PINCH_END_DISTANCE
-                    ) {
-                        wasPinching = false;
-
-                        console.log(
-                            "PINCH END:",
-                            handedness
-                        );
-
-                        if (
-                            grabbingHand === handedness && box
-                        ) {
-                            const releasePosition = thumbPosition
-                                .add(indexPosition)
-                                .scale(0.5);
-
-                            // Read the other hand now, so the midpoint does not
-                            // depend on the order of the hands' render callbacks.
-                            const otherHand = handTracking.getHandByHandedness(
-                                handedness === "left" ? "right" : "left"
-                            );
-                            const otherThumb = otherHand?.getJointMesh(WebXRHandJoint.THUMB_TIP);
-                            const otherIndex = otherHand?.getJointMesh(WebXRHandJoint.INDEX_FINGER_TIP);
-                            if (otherThumb && otherIndex) {
-                                const otherHandPosition = otherThumb.getAbsolutePosition()
-                                    .add(otherIndex.getAbsolutePosition())
-                                    .scale(0.5);
-                                releasePosition.addInPlace(otherHandPosition).scaleInPlace(0.5);
-                            }
-
-                            box.setParent(originalParent);
-
-                            // This scene has a roughly one-meter box. Keep its
-                            // volume beyond the hands so the viewer isn't inside it.
-                            box.computeWorldMatrix(true);
-                            const boxRadius = box.getBoundingInfo()
-                                .boundingSphere.radiusWorld;
-                            const awayFromHead = releasePosition.subtract(
-                                xr.baseExperience.camera.globalPosition
-                            );
-                            if (awayFromHead.lengthSquared() < 0.000001) {
-                                awayFromHead.copyFrom(
-                                    xr.baseExperience.camera.getForwardRay().direction
-                                );
-                            }
-                            releasePosition.addInPlace(
-                                awayFromHead.normalize().scale(boxRadius + 0.02)
-                            );
-                            box.setAbsolutePosition(releasePosition);
-
-                            grabbingHand = null;
-
-                            console.log(
-                                "BOX RELEASED:",
-                                handedness
-                            );
-                        }
-
-                    }
                 });
             });
         } catch (error) {
@@ -371,52 +227,20 @@ export default class XR {
         // wins, so hand the teleport back to the hand that actually pinched.
         const internals = teleportation as unknown as {
             _currentTeleportationControllerId: string;
-            _controllers: Record<string, { teleportationState: { forward: boolean }; xrController: { inputSource: XRInputSource } }>;
-            _options: { teleportationTargetMesh?: TransformNode };
+            _controllers: Record<string, { teleportationState: { forward: boolean } }>;
         };
-        const format = (value: Vector3) => value.asArray().map(n => n.toFixed(2)).join(", ");
-        const handOf = (id: string) => internals._controllers[id]?.xrController.inputSource.handedness ?? id;
         this.scene.onPointerObservable.add(pointerInfo => {
-            const isDown = pointerInfo.type === PointerEventTypes.POINTERDOWN;
-            if (!isDown && pointerInfo.type !== PointerEventTypes.POINTERUP) return;
+            if (pointerInfo.type !== PointerEventTypes.POINTERDOWN) return;
             const pointerId = (pointerInfo.event as PointerEvent).pointerId;
             const source = xr.pointerSelection.getXRControllerByPointerId(pointerId);
             if (!source?.inputSource.hand) return;
-            const handedness = source.inputSource.handedness;
-            if (!isDown) {
-                console.log("[XR teleporte] pinça solta:", handedness);
-                return;
-            }
-            console.log("[XR teleporte] pinça iniciada:", handedness);
             xr.baseExperience.sessionManager.onXRFrameObservable.addOnce(() => {
                 if (!internals._controllers[source.uniqueId]?.teleportationState.forward) return;
                 for (const [id, controller] of Object.entries(internals._controllers)) {
                     if (id !== source.uniqueId) controller.teleportationState.forward = false;
                 }
                 internals._currentTeleportationControllerId = source.uniqueId;
-                console.log("[XR teleporte] mão que controla o alvo:", handedness,
-                    "| mãos registradas:", Object.keys(internals._controllers).map(handOf).join(", "));
             });
-        });
-
-        // Temporary diagnostics: where the target is while the pinch is held.
-        let lastTargetLog = 0;
-        xr.baseExperience.sessionManager.onXRFrameObservable.add(() => {
-            const activeId = internals._currentTeleportationControllerId;
-            const target = internals._options.teleportationTargetMesh;
-            const now = performance.now();
-            if (!activeId || !target || now - lastTargetLog < 500) return;
-            lastTargetLog = now;
-            console.log("[XR teleporte] alvo atual:", format(target.position), "| mão:", handOf(activeId));
-        });
-
-        const camera = xr.baseExperience.camera;
-        teleportation.onBeforeCameraTeleport.add(position => {
-            console.log("[XR teleporte] câmera antes:", format(position));
-        });
-        teleportation.onAfterCameraTeleport.add(position => {
-            console.log("[XR teleporte] concluído:", format(position));
-            setTimeout(() => console.log("[XR teleporte] câmera 1 s depois:", format(camera.position)), 1000);
         });
     }
 }

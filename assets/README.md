@@ -1,11 +1,12 @@
-# Babylon.js Editor
+# Assets
 
-This folder contains all the assets used in the project.
+`Models/` holds the source GLBs that `src/App.ts` loads at runtime through Vite asset
+URLs: the doctor's office room, examination chair, seated patient, sphygmomanometer,
+stethoscope, hand sanitizer, and the folded cuff set (`Models/cuffs/`, see its README).
 
-`clinical-room.scene/` is the current procedural room blockout. Its generated asset
-inventory is `clinical-room/manifest.json`. Edit the dimensions and palette in
-`src/scene/clinicalRoomSpec.ts`, then run `npm run room:generate` to rebuild the
-Editor scene and runtime export. See the [visual specification](../references/CLINICAL_ROOM_VISUAL_SPEC.md)
-for ownership of generated objects, modeling conventions, and remaining work.
+The room is composed in code, not exported from the Babylon.js Editor. Positions and
+dimensions live in `src/scene/clinicalLayout.ts`.
 
-`example.scene/` retains the original pinch-box prototype.
+The earlier Editor scenes (`example.scene` pinch-box prototype and the procedural
+`clinical-room.scene` blockout) and their `public/scene/` exports were removed after the
+GLB room replaced them; they remain available in Git history.

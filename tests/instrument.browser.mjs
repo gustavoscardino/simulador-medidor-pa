@@ -127,8 +127,8 @@ try {
 	assert.equal(await evaluate("testApp.isPressureDeflationPaused()"), true);
 	assert.equal(await evaluate("testApp._scene.getMeshByName('instrument-bulb-label')"), null);
 	assert.deepEqual(await run(async () => {
-		const { clinicalStations } = await import("/src/scene/workstationLayout.ts");
-		return ["hygiene", "mesa", "prontuario"].map(name => clinicalStations[name].pos);
+		const { clinicalLayout } = await import("/src/scene/clinicalLayout.ts");
+		return ["hygiene", "mesa", "prontuario"].map(name => clinicalLayout.stations[name].position);
 	}), Array(3).fill([-1.05, 1.6, -1.5]));
 	assert.deepEqual(await run(async () => {
 		const { nextMockEvent } = await import("/src/simulation/mockRunner.ts");
@@ -147,6 +147,19 @@ try {
 		}
 		if (testApp.getCurrentSimulationAction()?.type !== "cuff-removed" || !manager.handleMeshInteraction(original)) throw new Error("Cuff removal rejected");
 		if (original.isEnabled() || scene.getTransformNodeByName("fitted-cuff-hoses").isEnabled()) throw new Error("Removed cuff/hoses still visible");
+		// The incoming wall panel restarts in place instead of reloading GLBs.
+		// Physical parts must survive manager disposal and remain usable in both modes.
+		const bulb = scene.getMeshByName("instrument-bulb");
+		for (const mode of ["evaluation", "tutorial"]) {
+			testApp.resetSession(mode);
+			if (testApp._scene !== scene || testApp.getGuidanceMode() !== mode) throw new Error("In-place mode reset failed");
+			if (!original.isEnabled() || scene.getMeshByName("instrument-bulb") !== bulb || bulb.isDisposed()) throw new Error("In-place reset destroyed the physical instrument");
+			if (scene.meshes.filter(mesh => mesh.name === "instrument-valve").length !== 1) throw new Error("Duplicate instrument controls");
+			for (let index = 0; index < 80 && testApp.getSimulationSnapshot().currentStepId !== "inflate-for-auscultation"; index++) {
+				if (!testApp.getInteractionManager().executeActiveActionFromScene()) throw new Error("Reset preparation failed");
+			}
+			if (!testApp.getInteractionManager().handleMeshInteraction(bulb) || testApp.getSimulationSnapshot().instruments.cuffPressure !== 10) throw new Error("Reset bulb does not inflate");
+		}
 		await testApp.restartSimulation();
 		const restored = testApp._scene.getMeshByName("fitted-cuff-sleeve");
 		restored.computeWorldMatrix(true);
@@ -154,8 +167,26 @@ try {
 		if (center.some((value, index) => Math.abs(value - restored.getAbsolutePosition().asArray()[index]) > 0.0001)) throw new Error("Cuff position changed after restart");
 		return { fitted: true, connected: true, removed: true, reset: true };
 	}), { fitted: true, connected: true, removed: true, reset: true });
+	const restartButton = await run(async () => {
+		const { Vector3, Matrix } = await import("/node_modules/@babylonjs/core/Maths/math.vector.js");
+		const scene = testApp._scene;
+		window.panelResetScene = scene;
+		const button = scene.getMeshByName("restart-panel-evaluation");
+		button.computeWorldMatrix(true);
+		const center = button.getBoundingInfo().boundingBox.centerWorld;
+		scene.activeCamera.position.set(center.x, center.y + 0.10, center.z - 1);
+		scene.activeCamera.setTarget(center);
+		scene.render();
+		const point = Vector3.Project(center, Matrix.Identity(), scene.getTransformMatrix(), scene.activeCamera.viewport.toGlobal(innerWidth, innerHeight));
+		return { x: point.x, y: point.y };
+	});
+	await click(restartButton.x, restartButton.y);
+	assert.equal(await evaluate("testApp.getGuidanceMode()"), "tutorial", "First panel selection only arms the restart");
+	await click(restartButton.x, restartButton.y);
+	await waitFor("testApp.getGuidanceMode() === 'evaluation'");
+	assert.equal(await evaluate("testApp._scene === panelResetScene && !testApp._scene.getMeshByName('instrument-bulb').isDisposed()"), true);
 	assert.equal(errors.length, 0, JSON.stringify(errors));
-	console.log("Instrument browser checks passed: rubber bulb vs dial, 14 real clicks, single valve opening, pause, fitted cuff/hoses, removal, reset, no page exceptions.");
+	console.log("Instrument browser checks passed: rubber bulb vs dial, 14 real clicks, single valve opening, pause, fitted cuff/hoses, removal, both in-place modes, two-click restart panel, reload, no page exceptions.");
 } finally {
 	socket.close();
 }

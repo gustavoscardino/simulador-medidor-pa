@@ -15,6 +15,11 @@ import type { Observer } from "@babylonjs/core/Misc/observable";
 import type { Nullable } from "@babylonjs/core/types";
 import type { App } from "../App";
 import { splitSphygmomanometer } from "../scene/splitSphygmomanometer";
+import { clinicalLayout, type StationId } from "../scene/clinicalLayout";
+import { SimulationAudio } from "./SimulationAudio";
+import { RestartPanel } from "./RestartPanel";
+import { renderDebriefHtml, timingLabel } from "./debriefView";
+import { buildDebrief, type DebriefReport } from "../simulation/debrief";
 import { auscultatoryScenario } from "../simulation/auscultatoryScenario";
 import { clinicalParameters, eligibleCuffs, requiredMaterials } from "../simulation/clinicalParameters";
 import type { ActionDefinition, CommunicationRecord, InteractionEvent, MeasurementRecord, SessionState, StepDefinition } from "../simulation/types";
@@ -22,7 +27,7 @@ import type { ActionDefinition, CommunicationRecord, InteractionEvent, Measureme
 interface TargetMeta {
 	label: string;
 	icon: string;
-	station: "overview" | "hygiene" | "prontuario" | "mesa" | "cadeira" | "esquerdo" | "direito";
+	station: StationId;
 }
 
 const targetInfo: Record<string, TargetMeta> = {
@@ -40,13 +45,12 @@ const targetInfo: Record<string, TargetMeta> = {
 	"dialogue-trigger": { label: "Diálogo com o Paciente", icon: "💬", station: "cadeira" },
 };
 
+const unguidedHeadline = "Modo sem orientação";
+const unguidedDetail = "Realize a próxima etapa do procedimento conforme o checklist.";
+
 const pressureInteractionSteps = [
 	"inflate-for-auscultation", "start-deflation", "identify-systolic", "identify-diastolic", "confirm-disappearance", "persistent-sounds",
 ];
-const auscultationListeningSteps = new Set([
-	"start-deflation", "identify-systolic", "identify-diastolic", "confirm-disappearance", "persistent-sounds",
-]);
-type KorotkoffPhase = "I" | "II" | "III" | "IV";
 
 export class InteractionManager {
 	private _visualMotions: Array<{ node: TransformNode | Mesh; from: Vector3; to: Vector3; startedAt: number; duration: number }> = [];
@@ -83,9 +87,8 @@ export class InteractionManager {
 	private _dialogueOpen = false;
 	private _lastDialogueText: string | null = null;
 	private _disposed = false;
-	private _audioCtx: AudioContext | null = null;
-	private _nextKorotkoffBeatAt = 0;
-	private _korotkoffListening = false;
+	private _audio = new SimulationAudio();
+	private _restartPanel: RestartPanel | null = null;
 	private _pointerObserver: Nullable<Observer<PointerInfo>> = null;
 	private _renderObserver: Nullable<Observer<Scene>> = null;
 	private _feedbackTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -98,13 +101,20 @@ export class InteractionManager {
 		this._initXrPressureBoard();
 		this._initDialogueTrigger();
 		this._initGuidanceHUD();
+		// Defer the reset: it disposes this manager, which is still handling the pick.
+		this._restartPanel = new RestartPanel(scene, app.getGuidanceMode(),
+			mode => setTimeout(() => this._app.resetSession(mode), 0));
 		this._initPointerInteractions();
 		this._moveSphygmomanometerNearPatient();
 		this._updateGuidance();
 	}
 
+	private _isEvaluationMode(): boolean {
+		return this._app.getGuidanceMode() === "evaluation";
+	}
+
 	public updatePressureDisplay(pressure: number): void {
-		this._updateKorotkoffAudio(pressure);
+		this._audio.updateKorotkoff(this._app.getSimulationSnapshot(), pressure);
 		const rounded = Math.round(pressure * 4) / 4;
 		if (!Number.isFinite(this._xrPressureBoardLastPressure) || Math.abs(rounded - this._xrPressureBoardLastPressure) >= 0.25) {
 			this._xrPressureBoardLastPressure = rounded;
@@ -112,78 +122,6 @@ export class InteractionManager {
 		}
 		const liveValue = this._guidanceCard?.querySelector("#hud-cuff-pressure-value");
 		if (liveValue) liveValue.textContent = `${Math.round(pressure)} mmHg`;
-	}
-
-	private _updateKorotkoffAudio(pressure: number): void {
-		const snapshot = this._app.getSimulationSnapshot();
-		const placedEarpieces = Boolean(snapshot?.observations["place-earpieces:earpieces-placed"]);
-		const placedChestpiece = Boolean(snapshot?.observations["place-bell:chestpiece-placed"]);
-		const listening = Boolean(snapshot && placedEarpieces && placedChestpiece
-			&& auscultationListeningSteps.has(snapshot.currentStepId ?? "")
-			&& pressure <= snapshot.config.pressure.systolic
-			&& (snapshot.config.persistentSounds ? pressure > 0 : pressure > snapshot.config.pressure.diastolic));
-
-		if (!listening) {
-			this._korotkoffListening = false;
-			this._nextKorotkoffBeatAt = 0;
-			return;
-		}
-		if (!this._audioCtx || this._audioCtx.state !== "running") return;
-
-		const now = this._audioCtx.currentTime;
-		if (!this._korotkoffListening) {
-			this._korotkoffListening = true;
-			this._nextKorotkoffBeatAt = now + 0.08;
-		}
-		if (now < this._nextKorotkoffBeatAt) return;
-
-		const { systolic, diastolic } = snapshot!.config.pressure;
-		const persistent = snapshot!.config.persistentSounds;
-		const phaseFourStart = diastolic + 5;
-		let phase: KorotkoffPhase;
-		if (pressure > systolic - 8) phase = "I";
-		else if (pressure > systolic - (systolic - diastolic) * 0.35) phase = "II";
-		else if (pressure > phaseFourStart) phase = "III";
-		else phase = "IV";
-		this._playKorotkoffBeat(phase);
-		this._nextKorotkoffBeatAt = now + 60 / 72;
-	}
-
-	private _playKorotkoffBeat(phase: KorotkoffPhase): void {
-		const ctx = this._audioCtx;
-		if (!ctx || ctx.state !== "running") return;
-		const settings = {
-			"I": { cutoff: 1800, level: 0.24, duration: 0.11, q: 1.5 },
-			"II": { cutoff: 520, level: 0.16, duration: 0.25, q: 0.55 },
-			"III": { cutoff: 1250, level: 0.34, duration: 0.16, q: 1.25 },
-			"IV": { cutoff: 300, level: 0.09, duration: 0.23, q: 0.7 },
-		}[phase];
-		const start = ctx.currentTime;
-		const duration = settings.duration;
-		const frameCount = Math.ceil(ctx.sampleRate * duration);
-		const buffer = ctx.createBuffer(1, frameCount, ctx.sampleRate);
-		const data = buffer.getChannelData(0);
-		for (let i = 0; i < frameCount; i++) {
-			const elapsed = i / ctx.sampleRate;
-			const envelope = phase === "II"
-				? Math.min(1, elapsed / 0.025) * Math.exp(-elapsed / 0.12)
-				: Math.exp(-elapsed / (phase === "IV" ? 0.065 : 0.032));
-			data[i] = (Math.random() * 2 - 1) * envelope;
-		}
-		const source = ctx.createBufferSource();
-		const filter = ctx.createBiquadFilter();
-		const gain = ctx.createGain();
-		source.buffer = buffer;
-		filter.type = "bandpass";
-		filter.frequency.setValueAtTime(settings.cutoff, start);
-		filter.Q.setValueAtTime(settings.q, start);
-		gain.gain.setValueAtTime(settings.level, start);
-		gain.gain.exponentialRampToValueAtTime(0.001, start + duration);
-		source.connect(filter);
-		filter.connect(gain);
-		gain.connect(ctx.destination);
-		source.start(start);
-		source.stop(start + duration);
 	}
 
 	private _animatePosition(node: TransformNode | Mesh, destination: Vector3): void {
@@ -225,7 +163,7 @@ export class InteractionManager {
 
 		// Place the model's visible bounds, rather than its offset GLB origin.
 		// The stand is forward of the supported arm, clear of the wrist approach.
-		const center = arm.getAbsolutePosition().add(new Vector3(0.25, -0.13, 0.14));
+		const center = arm.getAbsolutePosition().add(Vector3.FromArray(clinicalLayout.measurementStandOffset));
 		sphygmomanometer.rotation.y = 0;
 		sphygmomanometer.computeWorldMatrix(true);
 		const bounds = sphygmomanometer.getHierarchyBoundingVectors(true);
@@ -264,7 +202,10 @@ export class InteractionManager {
 		this._sphygmomanometerPositioned = true;
 		this._instrumentControls = splitSphygmomanometer(sphygmomanometer);
 		const cuff = this._scene.getMeshByName("fitted-cuff-sleeve");
-		if (cuff instanceof Mesh) this._cuffHoses = connectCuffInstrument(cuff, sphygmomanometer);
+		if (cuff instanceof Mesh) {
+			cuff.setEnabled(true);
+			this._cuffHoses = connectCuffInstrument(cuff, sphygmomanometer);
+		}
 	}
 
 	private _useInstrumentControl(target: string): boolean {
@@ -369,7 +310,7 @@ export class InteractionManager {
 	private _initXrSlate(): void {
 		const slateRoot = new TransformNode("xr-guidance-slate-root", this._scene);
 		// Offset it into the room so the wall mesh cannot occlude the slate.
-		slateRoot.position.set(-2.30, 1.85, -0.62);
+		slateRoot.position.fromArray(clinicalLayout.xrSlate);
 		// CreatePlane's front normal is local -Z, so rotate that normal toward +X
 		// (into the room) rather than turning the text away from the learner.
 		slateRoot.rotation.y = -Math.PI / 2;
@@ -630,8 +571,7 @@ export class InteractionManager {
 
 	private _initDialogueTrigger(): void {
 		const triggerRoot = new TransformNode("patient-dialogue-trigger-root", this._scene);
-		const patient = this._scene.getTransformNodeByName("patient-root");
-		triggerRoot.position.copyFrom(patient?.getAbsolutePosition() ?? Vector3.Zero()).addInPlace(new Vector3(0.18, 1.02, 0.40));
+		triggerRoot.position.fromArray(clinicalLayout.dialogueTrigger);
 
 		const disc = CreateCylinder("patient-dialogue-trigger", {
 			diameter: 0.22,
@@ -667,7 +607,7 @@ export class InteractionManager {
 			const logicalTarget = mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name);
 			// A rapid second press is a double tap rather than POINTERPICK.
 			// Count it for pressure controls only; confirmations keep single-click semantics.
-			if (doubleTap && !["instrument-bulb", "instrument-valve", "inflate-action", "gauge", "instrument-work-surface"].includes(logicalTarget)) return;
+			if (doubleTap && !["instrument-bulb", "instrument-valve", "inflate-action", "gauge", "instrument-work-surface", "restart-session"].includes(logicalTarget)) return;
 			if (point && ["gauge", "instrument-work-surface"].includes(logicalTarget)) {
 				const nearby = this._instrumentControls.map(part => {
 					part.computeWorldMatrix(true);
@@ -687,6 +627,7 @@ export class InteractionManager {
 	}
 
 	public handleMeshInteraction(mesh: Mesh): boolean {
+		if (this._restartPanel?.handlePick(mesh)) return true;
 		const logicalTarget = mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name);
 		if (logicalTarget === "instrument-bulb" || logicalTarget === "instrument-valve") return this._useInstrumentControl(logicalTarget);
 		if (logicalTarget === "dialogue-topic") {
@@ -724,7 +665,7 @@ export class InteractionManager {
 		if (["patient-arm", "patient-wrist", "cuff"].includes(logicalTarget)
 			&& meshArm && meshArm !== snapshot.config.arm) {
 			this._showFeedback(`Use o braço ${snapshot.config.arm} durante toda esta medição.`, false);
-			this._playChime(false);
+			this._audio.playChime(false);
 			return false;
 		}
 
@@ -736,9 +677,16 @@ export class InteractionManager {
 
 		// Check if the interaction target matches the active physical action requirement
 		if (logicalTarget !== currentAction.target) {
-			const expectedName = targetInfo[currentAction.target]?.label ?? currentAction.target;
-			this._showFeedback(`Alvo incorreto: a etapa atual requer interação com: ${expectedName}. Siga a seta indicadora.`, false);
-			this._playChime(false);
+			if (this._isEvaluationMode()) {
+				// Without guidance, choosing the wrong object is part of the assessment:
+				// submit it so the controller records a rejected attempt for the debrief.
+				this._app.dispatchSimulationEvent({ type: currentAction.type, target: logicalTarget, value: true });
+				this._showFeedback("Esta não é a próxima etapa do procedimento.", false);
+			} else {
+				const expectedName = targetInfo[currentAction.target]?.label ?? currentAction.target;
+				this._showFeedback(`Alvo incorreto: a etapa atual requer interação com: ${expectedName}. Siga a seta indicadora.`, false);
+			}
+			this._audio.playChime(false);
 			return false;
 		}
 		if (currentAction.type === "earpieces-placed"
@@ -1006,13 +954,14 @@ export class InteractionManager {
 		const targetPosition = this._resolveTargetPosition(action.target, action.type);
 		if (Vector3.Distance(position, targetPosition) > 0.45) return false;
 
-		const targetMesh = this._scene.meshes.find(mesh =>
-			(mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name)) === action.target
-			&& mesh instanceof Mesh && mesh.isPickable
+		const targetMesh = this._scene.meshes.find((mesh): mesh is Mesh =>
+			mesh instanceof Mesh
+			&& (mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name)) === action.target
+			&& mesh.isPickable
 		);
 		if (!targetMesh) return false;
 
-		return this.handleMeshInteraction(targetMesh as Mesh);
+		return this.handleMeshInteraction(targetMesh);
 	}
 
 	public handleStethoscopeRelease(position: Vector3): boolean {
@@ -1024,7 +973,7 @@ export class InteractionManager {
 		const tolerance = 0.65;
 		if (!destination || Vector3.Distance(position, destination) > tolerance) {
 			this._showFeedback("Leve o estetoscópio até o local indicado antes de soltá-lo.", false);
-			this._playChime(false);
+			this._audio.playChime(false);
 			return false;
 		}
 
@@ -1040,7 +989,7 @@ export class InteractionManager {
 		if (result.accepted) {
 			this._applyAcceptedVisual(event);
 			this._showFeedback(result.feedback || "Ação realizada corretamente.", true);
-			this._playChime(true);
+			this._audio.playChime(true);
 			this._updateGuidance();
 			return true;
 		} else {
@@ -1048,7 +997,7 @@ export class InteractionManager {
 				? `Leitura de ${event.value ?? "—"} mmHg não aceita. Pause ao ouvir a primeira batida; se ela já passou, reinicie a sessão para tentar novamente.`
 				: result.feedback || "Ação não aceita.";
 			this._showFeedback(feedback, false);
-			this._playChime(false);
+			this._audio.playChime(false);
 			return false;
 		}
 	}
@@ -1075,10 +1024,10 @@ export class InteractionManager {
 
 		if (result.accepted) {
 			this._showFeedback(result.feedback, true);
-			this._playChime(true);
+			this._audio.playChime(true);
 		} else {
 			this._showFeedback(result.feedback, false);
-			this._playChime(false);
+			this._audio.playChime(false);
 		}
 
 		this._updateGuidance();
@@ -1106,7 +1055,7 @@ export class InteractionManager {
 		if (!snapshot || !this._guidanceCard) return;
 
 		if (snapshot.completed) {
-			this._renderCompletionHUD();
+			this._renderCompletionHUD(snapshot);
 			return;
 		}
 
@@ -1149,9 +1098,14 @@ export class InteractionManager {
 			action.type
 		);
 		this._targetLerpPosition.copyFrom(targetPos);
-		this._arrowRoot?.setEnabled(!isInflationStep);
+		const guided = !this._isEvaluationMode();
+		this._arrowRoot?.setEnabled(guided && !isInflationStep);
 
 		const progressPercent = this._getProgressPercent(snapshot);
+		// Multi-action steps show which action is current so learners can tell
+		// that an accepted action registered (B3).
+		const actionCount = step.completionConditions.length;
+		const actionProgress = actionCount > 1 ? `Ação ${snapshot.actionIndex + 1} de ${actionCount}` : "";
 		this._xrConfirmationTarget?.setEnabled(Boolean(confirmationLabel));
 		const confirmationHtml = confirmationLabel ? `
 			<div class="step-actions-row">
@@ -1225,13 +1179,18 @@ export class InteractionManager {
 			`;
 		}
 
+		// Evaluation mode keeps the controls needed to operate the instruments but
+		// hides the step, its target and the shortcut to the right station.
+		const headline = guided ? step.prompt : unguidedHeadline;
+		const detail = guided ? action.prompt : unguidedDetail;
 		this._guidanceCard.innerHTML = `
 			<div class="guidance-header">
 				<span class="step-counter-badge">Progresso geral: ${progressPercent}%</span>
-				<span class="step-target-badge">${target.icon} ${target.label}</span>
+				<span class="step-target-badge">${guided ? `${target.icon} ${target.label}` : "🎓 Sem orientação"}</span>
 			</div>
-			<h3 class="step-headline">${step.prompt}</h3>
-			<p class="step-detail">${action.prompt}</p>
+			<h3 class="step-headline">${headline}</h3>
+			${guided && actionProgress ? `<p class="step-action-progress">${actionProgress}</p>` : ""}
+			<p class="step-detail">${detail}</p>
 
 			${pressureHtml}
 			${this._sphygmomanometerPositioned && (pressureInteractionSteps.includes(step.id) || step.id === "estimate-systolic") ? `<p class="step-detail">Clique na pera de borracha para inflar (+10 mmHg), ou feche e abra a mão sobre ela. Clique na pequena válvula entre a pera e a mangueira para iniciar, pausar ou retomar a deflação. O mostrador circular serve para ler a pressão.</p>` : ""}
@@ -1248,11 +1207,11 @@ export class InteractionManager {
 				</button>
 			</div>
 
-			<div class="step-actions-row">
+			${guided ? `<div class="step-actions-row">
 				<button id="hud-goto-station-button" class="button secondary" type="button" style="width: 100%; font-size: 13px;">
 					📍 Ir até a estação (${target.station})
 				</button>
-			</div>
+			</div>` : ""}
 
 			<div class="step-progress-container">
 				<div class="step-progress-track">
@@ -1285,7 +1244,12 @@ export class InteractionManager {
 		});
 
 		// Update in-headset 3D slate
-		this._renderXrSlate(progressPercent, step.prompt, action.prompt, target.label, target.station, confirmationLabel, canInflate, deflationControlLabel, pressureBoardActive);
+		if (guided) {
+			const xrInstruction = actionProgress ? `${actionProgress} • ${action.prompt}` : action.prompt;
+			this._renderXrSlate(progressPercent, step.prompt, xrInstruction, target.label, target.station, confirmationLabel, canInflate, deflationControlLabel, pressureBoardActive);
+		} else {
+			this._renderXrSlate(progressPercent, unguidedHeadline, unguidedDetail, "—", "—", confirmationLabel, canInflate, deflationControlLabel, pressureBoardActive);
+		}
 	}
 
 	private _getConfirmationLabel(actionType?: string): string | null {
@@ -1408,100 +1372,12 @@ export class InteractionManager {
 		this._renderXrSlateDialogue(done5, done6, done7, done23, progressPercent);
 	}
 
-	private _renderCompletionHUD(): void {
+	private _renderCompletionHUD(snapshot: SessionState): void {
 		if (!this._guidanceCard) return;
 		this._xrConfirmationTarget?.setEnabled(false);
 
-		const records = this._app.getCommunicationEvaluation();
-		const findRecord = (id: string) => records.find(r => r.stepId === id);
-
-		const r5 = findRecord("identify-patient");
-		const r6 = findRecord("check-readiness");
-		const r7 = findRecord("explain-and-rest");
-		const r23 = findRecord("inform-patient");
-
-		let commScore = 100;
-		for (const r of [r5, r6, r7, r23]) {
-			if (!r || r.status === "omitted") commScore -= 25;
-			else if (r.timing === "late" || r.timing === "early") commScore -= 10;
-		}
-		commScore = Math.max(0, commScore);
-
-		const totalScore = Math.round(50 + (commScore * 0.5));
-
-		const formatBadge = (r?: CommunicationRecord) => {
-			if (!r || r.status === "omitted") return `<span class="debrief-badge omitted">❌ Omitido</span>`;
-			if (r.timing === "ideal") return `<span class="debrief-badge ideal">✓ Momento Ideal</span>`;
-			if (r.timing === "late") return `<span class="debrief-badge late">⚠ Tardio</span>`;
-			return `<span class="debrief-badge early">⚠ Precoce</span>`;
-		};
-
-		this._guidanceCard.innerHTML = `
-			<div class="guidance-header">
-				<span class="step-counter-badge" style="background: #2e7d32;">Concluído</span>
-				<span class="step-target-badge">📊 Debriefing Formativo</span>
-			</div>
-			<div class="debrief-score-card">
-				<div class="debrief-score-num">${totalScore} / 100</div>
-				<div class="debrief-score-label">Pontuação Geral de Competência Clínica</div>
-			</div>
-
-			<div class="debrief-section">
-				<h4 class="debrief-section-title">🩺 Procedimento Físico (22 Etapas Concluídas)</h4>
-				<ul class="debrief-list">
-					<li>✓ Higiene das mãos cumprida nos 4 momentos essenciais (Passos 1, 4, 8, 25).</li>
-					<li>✓ Assepsia e desinfecção do estetoscópio com álcool 70% (Passo 2).</li>
-					<li>✓ Separação e preparo de materiais na bandeja e olhos alinhados ao manômetro (Passos 3, 13).</li>
-					<li>✓ Estimativa prévia da sistólica por palpação radial (Passo 14).</li>
-					<li>✓ Ausculta braquial, deflação a 2 mmHg/s e identificação de fases I e V (Passos 16–21).</li>
-					<li>✓ Remoção do manguito e documentação completa no prontuário (Passos 24, 26).</li>
-				</ul>
-			</div>
-
-			<div class="debrief-section">
-				<h4 class="debrief-section-title">💬 Comunicação e Anamnese (Ícone Lateral)</h4>
-				<div class="debrief-item">
-					<div class="debrief-item-header">
-						<strong>Passo 5: Identificação do Paciente</strong>
-						${formatBadge(r5)}
-					</div>
-					<p class="debrief-item-detail">${r5?.feedback ?? "Não realizado."}</p>
-				</div>
-				<div class="debrief-item">
-					<div class="debrief-item-header">
-						<strong>Passo 6: Condições de Preparo</strong>
-						${formatBadge(r6)}
-					</div>
-					<p class="debrief-item-detail">${r6?.feedback ?? "Não realizado."}</p>
-				</div>
-				<div class="debrief-item">
-					<div class="debrief-item-header">
-						<strong>Passo 7: Orientações e Repouso 5 min</strong>
-						${formatBadge(r7)}
-					</div>
-					<p class="debrief-item-detail">${r7?.feedback ?? "Não realizado."}</p>
-				</div>
-				<div class="debrief-item">
-					<div class="debrief-item-header">
-						<strong>Passo 23: Comunicação de Resultados</strong>
-						${formatBadge(r23)}
-					</div>
-					<p class="debrief-item-detail">${r23?.feedback ?? "Não realizado."}</p>
-				</div>
-			</div>
-
-			<div class="step-actions-row" style="margin-top: 10px;">
-				<button id="debrief-restart-btn" class="button primary" type="button" style="flex: 1;">
-					<span>Reiniciar Simulação</span>
-					<span>🔄</span>
-				</button>
-			</div>
-			<div class="step-actions-row">
-				<button id="debrief-menu-btn" class="button secondary" type="button" style="width: 100%;">
-					Voltar ao Menu Principal
-				</button>
-			</div>
-		`;
+		const report = buildDebrief(snapshot);
+		this._guidanceCard.innerHTML = renderDebriefHtml(report);
 
 		const restartBtn = this._guidanceCard.querySelector("#debrief-restart-btn") as HTMLButtonElement | null;
 		restartBtn?.addEventListener("click", () => {
@@ -1513,14 +1389,7 @@ export class InteractionManager {
 			this._app.returnToMenu();
 		});
 
-		// Render XR slate debrief mode
-		this._renderXrSlateDebrief(
-			totalScore,
-			r5 ? (r5.timing === "ideal" ? "Ideal" : r5.timing === "late" ? "Tardio" : "Omitido") : "Omitido",
-			r6 ? (r6.timing === "ideal" ? "Ideal" : r6.timing === "late" ? "Tardio" : "Omitido") : "Omitido",
-			r7 ? (r7.timing === "ideal" ? "Ideal" : r7.timing === "late" ? "Tardio" : "Omitido") : "Omitido",
-			r23 ? (r23.timing === "ideal" ? "Ideal" : "Omitido") : "Omitido"
-		);
+		this._renderXrSlateDebrief(report);
 	}
 
 	private _renderXrSlate(progressPercent: number, title: string, instruction: string, targetName: string, station: string, confirmationLabel: string | null, canInflate = false, deflationControlLabel: string | null = null, pressureBoardActive = false): void {
@@ -1694,7 +1563,7 @@ export class InteractionManager {
 		this._xrSlateTexture.update();
 	}
 
-	private _renderXrSlateDebrief(score: number, p5: string, p6: string, p7: string, p23: string): void {
+	private _renderXrSlateDebrief(report: DebriefReport): void {
 		if (!this._xrSlateTexture) return;
 		const ctx = this._xrSlateTexture.getContext() as unknown as CanvasRenderingContext2D;
 		const w = 1024;
@@ -1711,28 +1580,38 @@ export class InteractionManager {
 		ctx.stroke();
 
 		ctx.fillStyle = "#00E5FF";
-		ctx.font = "bold 32px 'Segoe UI', Arial, sans-serif";
-		ctx.fillText(`RELATÓRIO DE DEBRIEFING CLÍNICO • CONCLUÍDO`, 40, 70);
+		ctx.font = "bold 30px 'Segoe UI', Arial, sans-serif";
+		ctx.fillText("RELATÓRIO DE DEBRIEFING CLÍNICO • CONCLUÍDO", 40, 64);
 
 		ctx.fillStyle = "#81C784";
-		ctx.font = "bold 34px 'Segoe UI', Arial, sans-serif";
-		ctx.fillText(`PONTUAÇÃO GERAL: ${score} / 100`, 40, 125);
+		ctx.font = "bold 32px 'Segoe UI', Arial, sans-serif";
+		ctx.fillText(`PONTUAÇÃO GERAL: ${report.totalScore} / 100`, 40, 112);
+		ctx.font = "22px 'Segoe UI', Arial, sans-serif";
+		ctx.fillText(`Procedimento ${report.physicalScore} • Comunicação ${report.communicationScore} • ${report.flawlessStepCount}/${report.physicalStepCount} etapas sem erros`, 40, 146);
 
+		const { readings } = report;
+		const reading = (value: number | null) => value === null ? "—" : `${value}`;
 		ctx.fillStyle = "#FFFFFF";
-		ctx.font = "bold 26px 'Segoe UI', Arial, sans-serif";
-		ctx.fillText("Avaliação da Comunicação (Ícone Lateral):", 40, 180);
+		ctx.font = "22px 'Segoe UI', Arial, sans-serif";
+		ctx.fillText(`Registrado: ${reading(readings.recordedSystolic)}/${reading(readings.recordedDiastolic)} mmHg • Referência do caso: ${readings.referenceSystolic}/${readings.referenceDiastolic} mmHg`, 40, 190);
 
-		ctx.font = "24px 'Segoe UI', Arial, sans-serif";
+		ctx.font = "bold 24px 'Segoe UI', Arial, sans-serif";
+		ctx.fillText("Comunicação:", 40, 236);
+		ctx.font = "22px 'Segoe UI', Arial, sans-serif";
 		ctx.fillStyle = "#E0E0E0";
-		ctx.fillText(`• Identificação (Passo 5): ${p5}`, 40, 225);
-		ctx.fillText(`• Condições de Preparo (Passo 6): ${p6}`, 40, 270);
-		ctx.fillText(`• Orientações e Repouso 5 min (Passo 7): ${p7}`, 40, 315);
-		ctx.fillText(`• Comunicação de Resultados (Passo 23): ${p23}`, 40, 360);
+		report.communication.forEach((record, index) => {
+			ctx.fillText(`• ${record.title}: ${timingLabel(record)}`, 40, 266 + index * 28);
+		});
 
 		ctx.fillStyle = "#FFD54F";
-		ctx.font = "italic 24px 'Segoe UI', Arial, sans-serif";
-		ctx.fillText("✓ Procedimento físico concluído conforme as diretrizes!", 40, 430);
-		ctx.fillText("Utilize o menu para reiniciar ou retornar.", 40, 470);
+		ctx.font = "italic 22px 'Segoe UI', Arial, sans-serif";
+		if (report.stepsWithErrors.length) {
+			const steps = report.stepsWithErrors.map(step => `Passo ${step.checklistNumber} (${step.errors}×)`).join(", ");
+			this._drawWrappedText(ctx, `Tentativas incorretas: ${steps}`, 40, 400, 940, 28);
+		} else {
+			ctx.fillText("✓ Todas as etapas físicas sem tentativas incorretas.", 40, 400);
+		}
+		ctx.fillText("Utilize o menu para reiniciar ou retornar.", 40, 466);
 
 		this._xrSlateTexture.update();
 	}
@@ -1775,39 +1654,6 @@ export class InteractionManager {
 		}, 3800);
 	}
 
-	private _playChime(isSuccess: boolean): void {
-		try {
-			const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-			if (!AudioContextClass) return;
-			if (!this._audioCtx) this._audioCtx = new AudioContextClass();
-			if (this._audioCtx.state === "suspended") void this._audioCtx.resume();
-
-			const ctx = this._audioCtx;
-			const osc = ctx.createOscillator();
-			const gain = ctx.createGain();
-			osc.connect(gain);
-			gain.connect(ctx.destination);
-
-			if (isSuccess) {
-				osc.frequency.setValueAtTime(659.25, ctx.currentTime);
-				osc.frequency.setValueAtTime(880, ctx.currentTime + 0.08);
-				gain.gain.setValueAtTime(0.08, ctx.currentTime);
-				gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.28);
-				osc.start(ctx.currentTime);
-				osc.stop(ctx.currentTime + 0.28);
-			} else {
-				osc.type = "sine";
-				osc.frequency.setValueAtTime(261.63, ctx.currentTime);
-				gain.gain.setValueAtTime(0.08, ctx.currentTime);
-				gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
-				osc.start(ctx.currentTime);
-				osc.stop(ctx.currentTime + 0.22);
-			}
-		} catch {
-			// Audio context blocked or unsupported
-		}
-	}
-
 	public dispose(): void {
 		this._disposed = true;
 		this._visualMotions = [];
@@ -1825,8 +1671,12 @@ export class InteractionManager {
 		}
 		this._guidanceCard?.remove();
 		this._guidanceCard = null;
+		if (this._instrumentFeedback) {
+			this._instrumentFeedback.mesh.scaling.copyFrom(this._instrumentFeedback.rest);
+			this._instrumentFeedback.mesh.rotationQuaternion = this._instrumentFeedback.rotation.clone();
+		}
 		this._instrumentFeedback = null;
-		this._instrumentControls.forEach(control => control.dispose());
+		// The physical instrument is scene-owned and reused by the XR restart panel.
 		this._instrumentControls = [];
 		this._measurementStand?.dispose(false, true);
 		this._measurementStand = null;
@@ -1862,7 +1712,8 @@ export class InteractionManager {
 		this._xrPressureBoardRoot = null;
 		this._xrSlateRoot?.dispose();
 		this._xrSlateRoot = null;
-		this._audioCtx?.close().catch(() => {});
-		this._audioCtx = null;
+		this._audio.dispose();
+		this._restartPanel?.dispose();
+		this._restartPanel = null;
 	}
 }
