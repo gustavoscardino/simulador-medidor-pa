@@ -89,7 +89,8 @@ export class SimulationAudio {
 			const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
 			if (!AudioContextClass) return;
 			if (!this._audioCtx) this._audioCtx = new AudioContextClass();
-			if (this._audioCtx.state === "suspended") void this._audioCtx.resume();
+			// A pending resume rejects once the session closes the context; nothing to do then.
+			if (this._audioCtx.state === "suspended") this._audioCtx.resume().catch(() => {});
 
 			const ctx = this._audioCtx;
 			const osc = ctx.createOscillator();
