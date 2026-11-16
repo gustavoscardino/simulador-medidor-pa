@@ -93,7 +93,6 @@ export default class XR {
                         initialSpawnPosition.z
                     );
                     camera.setTarget(initialTarget);
-                    console.log("[XR spawn] posição inicial:", camera.position.asArray().map(value => value.toFixed(2)));
                 }
             });
 
@@ -291,6 +290,7 @@ export default class XR {
                         );
 
                         if (
+                            box &&
                             grabbingHand === handedness
                         ) {
                             const releasePosition = thumbPosition
@@ -362,52 +362,20 @@ export default class XR {
         // wins, so hand the teleport back to the hand that actually pinched.
         const internals = teleportation as unknown as {
             _currentTeleportationControllerId: string;
-            _controllers: Record<string, { teleportationState: { forward: boolean }; xrController: { inputSource: XRInputSource } }>;
-            _options: { teleportationTargetMesh?: TransformNode };
+            _controllers: Record<string, { teleportationState: { forward: boolean } }>;
         };
-        const format = (value: Vector3) => value.asArray().map(n => n.toFixed(2)).join(", ");
-        const handOf = (id: string) => internals._controllers[id]?.xrController.inputSource.handedness ?? id;
         this.scene.onPointerObservable.add(pointerInfo => {
-            const isDown = pointerInfo.type === PointerEventTypes.POINTERDOWN;
-            if (!isDown && pointerInfo.type !== PointerEventTypes.POINTERUP) return;
+            if (pointerInfo.type !== PointerEventTypes.POINTERDOWN) return;
             const pointerId = (pointerInfo.event as PointerEvent).pointerId;
             const source = xr.pointerSelection.getXRControllerByPointerId(pointerId);
             if (!source?.inputSource.hand) return;
-            const handedness = source.inputSource.handedness;
-            if (!isDown) {
-                console.log("[XR teleporte] pinça solta:", handedness);
-                return;
-            }
-            console.log("[XR teleporte] pinça iniciada:", handedness);
             xr.baseExperience.sessionManager.onXRFrameObservable.addOnce(() => {
                 if (!internals._controllers[source.uniqueId]?.teleportationState.forward) return;
                 for (const [id, controller] of Object.entries(internals._controllers)) {
                     if (id !== source.uniqueId) controller.teleportationState.forward = false;
                 }
                 internals._currentTeleportationControllerId = source.uniqueId;
-                console.log("[XR teleporte] mão que controla o alvo:", handedness,
-                    "| mãos registradas:", Object.keys(internals._controllers).map(handOf).join(", "));
             });
-        });
-
-        // Temporary diagnostics: where the target is while the pinch is held.
-        let lastTargetLog = 0;
-        xr.baseExperience.sessionManager.onXRFrameObservable.add(() => {
-            const activeId = internals._currentTeleportationControllerId;
-            const target = internals._options.teleportationTargetMesh;
-            const now = performance.now();
-            if (!activeId || !target || now - lastTargetLog < 500) return;
-            lastTargetLog = now;
-            console.log("[XR teleporte] alvo atual:", format(target.position), "| mão:", handOf(activeId));
-        });
-
-        const camera = xr.baseExperience.camera;
-        teleportation.onBeforeCameraTeleport.add(position => {
-            console.log("[XR teleporte] câmera antes:", format(position));
-        });
-        teleportation.onAfterCameraTeleport.add(position => {
-            console.log("[XR teleporte] concluído:", format(position));
-            setTimeout(() => console.log("[XR teleporte] câmera 1 s depois:", format(camera.position)), 1000);
         });
     }
 }
