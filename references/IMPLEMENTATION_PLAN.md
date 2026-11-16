@@ -1,5 +1,9 @@
 # Blood Pressure Simulator Implementation Plan
 
+## Current workstation layout (2026-11-16)
+
+The patient/chair assembly now occupies the former instrument-table area. Supplies and the record sit on a side table beside the measured arm; the manometer is available there from session start. Preparation and measurement share one learner position, so the learner can turn toward supplies without walking to another station. `src/scene/workstationLayout.ts` is the current coordinate source for scene placement, desktop viewpoints, and XR snap points; older milestone coordinates below are historical. See B14/B15 in `IMPLEMENTATION_BACKLOG.md` for screenshots, click-regression evidence, and pending headset validation. The single right arm, pre-fitted cuff, and non-blocking communication scope are preserved. The user subsequently authorized replacing the blue cuff placeholder: the fitted fabric cuff and routed hoses now form the visible assembly, with inflation on the actual rubber bulb and release on a metal valve beside it. See the latest B5/B15 evidence for the current scope and device validation limits.
+
 ## Objective and Scope
 
 Create **“Simulador de medição de pressão arterial”**, a Portuguese-language WebXR simulator. The initial scenario is blood pressure measurement using the **auscultatory method**, with a seated patient and multiple guided steps. Menus, instructions, dialogue, feedback, and results must be in Portuguese; development documentation may remain in English.

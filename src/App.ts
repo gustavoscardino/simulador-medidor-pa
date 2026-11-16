@@ -1,3 +1,5 @@
+import { buildFittedCuff } from "./scene/buildFittedCuff";
+import { clinicalStations, patientStationOffset, supplyTableCenter, supplyPositions } from "./scene/workstationLayout";
 import { Scene } from "@babylonjs/core/scene";
 import { Engine } from "@babylonjs/core/Engines/engine";
 import { UniversalCamera } from "@babylonjs/core/Cameras/universalCamera";
@@ -13,7 +15,6 @@ import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
 import { CreateGround } from "@babylonjs/core/Meshes/Builders/groundBuilder";
 import { CreateBox } from "@babylonjs/core/Meshes/Builders/boxBuilder";
 import { CreateSphere } from "@babylonjs/core/Meshes/Builders/sphereBuilder";
-import { CreateCylinder } from "@babylonjs/core/Meshes/Builders/cylinderBuilder";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
 import { HavokPlugin } from "@babylonjs/core/Physics/v2/Plugins/havokPlugin";
 import XR from "./scripts/xr";
@@ -426,6 +427,16 @@ export class App {
 
 		// Use the actual desktop height, not the model origin or an assumed desk height.
 		if (!table) throw new Error("Mesa de instrumentos não encontrada.");
+		// Detach with its world transform preserved, then put the narrow table
+		// crosswise beside the measured arm instead of behind the patient.
+		table.setParent(null);
+		table.rotate(new Vector3(0, 1, 0), Math.PI / 2);
+		table.computeWorldMatrix(true);
+		const tableBounds = table.getBoundingInfo().boundingBox;
+		table.position.addInPlace(new Vector3(
+			supplyTableCenter[0] - tableBounds.centerWorld.x, 0,
+			supplyTableCenter[1] - tableBounds.centerWorld.z,
+		));
 		table.computeWorldMatrix(true);
 		const desktopY = table.getBoundingInfo().boundingBox.maximumWorld.y;
 		const trayTopY = desktopY + 0.02;
@@ -456,9 +467,9 @@ export class App {
 			"sanitizer"
 		);
 
-		this._placeModelOnSurface(sphygmo, new Vector3(-2.04, trayTopY, -0.88), "gauge");
-		this._placeModelOnSurface(stethoscope, new Vector3(-2.04, trayTopY, -1.17), "stethoscope");
-		this._placeModelOnSurface(sanitizer, new Vector3(-2.04, desktopY, -0.62), "hygiene-station");
+		this._placeModelOnSurface(sphygmo, new Vector3(supplyTableCenter[0], trayTopY, supplyTableCenter[1]), "gauge");
+		this._placeModelOnSurface(stethoscope, new Vector3(supplyPositions.stethoscope[0], trayTopY, supplyPositions.stethoscope[1]), "stethoscope");
+		this._placeModelOnSurface(sanitizer, new Vector3(supplyPositions.sanitizer[0], desktopY, supplyPositions.sanitizer[1]), "hygiene-station");
 
 		// Ground plane for WebXR floor teleportation
 		const ground = CreateGround("ground", { width: 10, height: 10 }, scene);
@@ -481,8 +492,8 @@ export class App {
 		wallSide.visibility = 0;
 		wallSide.isPickable = false;
 
-		const tray = CreateBox("tray", { width: 0.33, height: 0.02, depth: 0.62 }, scene);
-		tray.position.set(-2.04, desktopY + 0.01, -1.04);
+		const tray = CreateBox("tray", { width: 0.53, height: 0.02, depth: 0.32 }, scene);
+		tray.position.set(-1.08, desktopY + 0.01, supplyTableCenter[1]);
 		tray.metadata = { assetId: "tray", logicalTarget: "tray" };
 		const trayMat = new PBRMaterial("tray-material", scene);
 		trayMat.albedoColor = new Color3(0.92, 0.94, 0.96);
@@ -517,29 +528,26 @@ export class App {
 		const selectedArmAnchor = config.arm === "esquerdo" ? armL : armR;
 		const selectedWristAnchor = config.arm === "esquerdo" ? wristL : wristR;
 
-		// Simple fitted cuff placeholder; replace with a patient-matched asset later.
-		const cuffSleeve = CreateCylinder("fitted-cuff-sleeve", {
-			height: 0.14,
-			diameter: 0.165,
-			tessellation: 24,
-		}, scene);
-		cuffSleeve.position.set(
-			selectedArmAnchor.position.x,
-			selectedArmAnchor.position.y,
-			selectedArmAnchor.position.z + 0.12
-		);
-		cuffSleeve.rotation.x = Math.PI / 2;
-		cuffSleeve.isPickable = true;
-		cuffSleeve.checkCollisions = true;
-		cuffSleeve.metadata = { assetId: "fitted-cuff-sleeve", logicalTarget: "cuff", arm: config.arm };
-		const cuffMaterial = new StandardMaterial("fitted-cuff-material", scene);
-		cuffMaterial.diffuseColor = Color3.FromHexString("#1B4965");
-		cuffMaterial.specularColor = new Color3(0.2, 0.2, 0.2);
-		cuffSleeve.material = cuffMaterial;
+		const cuffSleeve = buildFittedCuff(scene, patient);
+
+		// Translate the complete, already posed patient station as one assembly.
+		// Pose helpers intentionally run before this because they inspect source coordinates.
+		const patientStation = new TransformNode("patient-station-root", scene);
+		for (const node of [chair, patient, scene.getTransformNodeByName("cuff-set"), armL, armR, wristL, wristR, cuffSleeve]) {
+			node?.setParent(patientStation);
+		}
+		patientStation.position.set(...patientStationOffset);
+		patientStation.computeWorldMatrix(true);
+		for (const node of patientStation.getChildMeshes()) node.computeWorldMatrix(true);
+		patient.computeWorldMatrix(true);
+		if (clipboard instanceof Mesh) {
+			clipboard.setParent(null);
+			this._placeModelOnSurface(clipboard, new Vector3(supplyPositions.record[0], desktopY + 0.002, supplyPositions.record[1]), "record");
+		}
 
 		// Camera placed in the center of the doctor's office
-		const camera = new UniversalCamera("clinical-camera", new Vector3(0, 1.6, 0.5), scene);
-		camera.setTarget(new Vector3(0, 1.1, -1.8));
+		const camera = new UniversalCamera("clinical-camera", new Vector3(...clinicalStations.direito.pos), scene);
+		camera.setTarget(new Vector3(...clinicalStations.direito.lookAt));
 		camera.speed = 0.45;
 		camera.inertia = 0.25;
 		camera.minZ = 0.025;
@@ -572,18 +580,18 @@ export class App {
 				units: "meters",
 				status: "glb-room",
 				anchors: [
-					{ name: "hygiene-station", position: [-2.04, desktopY + 0.12, -0.62], logicalTarget: "hygiene-station" },
+					{ name: "hygiene-station", position: [supplyPositions.sanitizer[0], desktopY + 0.12, supplyPositions.sanitizer[1]], logicalTarget: "hygiene-station" },
 					{ name: "soap-dispenser", position: [0.792, 1.272, -2.391], logicalTarget: "hygiene-station" },
-					{ name: "record", position: [-0.072, 0.88, -1.824], logicalTarget: "record" },
-					{ name: "table", position: [-2.04, desktopY, -0.96], logicalTarget: "table" },
-					{ name: "treatment-chair", position: [-1.00, 0.72, -1.10], logicalTarget: "patient" },
+					{ name: "record", position: clipboard?.getAbsolutePosition().asArray() ?? [], logicalTarget: "record" },
+					{ name: "table", position: [supplyTableCenter[0], desktopY, supplyTableCenter[1]], logicalTarget: "table" },
+					{ name: "treatment-chair", position: patient.getAbsolutePosition().asArray(), logicalTarget: "patient" },
 					{ name: "tray", position: tray.position.asArray(), logicalTarget: "tray" },
-					{ name: "sphygmomanometer", position: [-2.04, trayTopY, -0.88], logicalTarget: "gauge" },
-					{ name: "sanitizer", position: [-2.04, desktopY, -0.62], logicalTarget: "hygiene-station" },
-					{ name: "stethoscope", position: [-2.04, trayTopY, -1.17], logicalTarget: "stethoscope" },
-					{ name: "patient-arm", position: selectedArmAnchor.position.asArray(), logicalTarget: "patient-arm" },
-					{ name: "patient-wrist", position: selectedWristAnchor.position.asArray(), logicalTarget: "patient-wrist" },
-					{ name: "cuffs", position: [-1.15, 0.85, -1.75], logicalTarget: "cuffs" },
+					{ name: "sphygmomanometer", position: sphygmo.getAbsolutePosition().asArray(), logicalTarget: "gauge" },
+					{ name: "sanitizer", position: sanitizer.getAbsolutePosition().asArray(), logicalTarget: "hygiene-station" },
+					{ name: "stethoscope", position: stethoscope.getAbsolutePosition().asArray(), logicalTarget: "stethoscope" },
+					{ name: "patient-arm", position: selectedArmAnchor.getAbsolutePosition().asArray(), logicalTarget: "patient-arm" },
+					{ name: "patient-wrist", position: selectedWristAnchor.getAbsolutePosition().asArray(), logicalTarget: "patient-wrist" },
+					{ name: "cuffs", position: chairTray.getBoundingInfo().boundingBox.centerWorld.asArray(), logicalTarget: "cuffs" },
 				],
 			},
 			scripts: [{ enabled: true, key: "scripts/xr.ts", _id: "clinical-room-xr", debugOnly: false }],
@@ -647,15 +655,7 @@ export class App {
 		if (!this._scene) return;
 		const camera = this._scene.activeCamera;
 		if (!camera) return;
-		const targets: Record<string, { pos: [number, number, number]; lookAt: [number, number, number] }> = {
-			overview: { pos: [0, 1.6, 0.5], lookAt: [0, 1.1, -1.8] },
-			hygiene: { pos: [0.79, 1.6, -1.5], lookAt: [0.79, 1.27, -2.39] },
-			prontuario: { pos: [-0.07, 1.6, -1.2], lookAt: [-0.07, 0.88, -1.82] },
-			mesa: { pos: [-1.50, 1.60, -0.50], lookAt: [-2.04, 1.0, -1.0] },
-			cadeira: { pos: [-0.20, 1.70, -0.35], lookAt: [-1.00, 1.00, -1.15] },
-			esquerdo: { pos: [0.05, 1.60, -0.55], lookAt: [-0.85, 0.85, -0.95] },
-			direito: { pos: [-0.18, 1.60, -1.82], lookAt: [-0.98, 1.085, -1.50] },
-		};
+		const targets = clinicalStations;
 		const target = targets[station];
 		if (!target) return;
 		if (camera instanceof UniversalCamera) {

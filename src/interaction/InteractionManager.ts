@@ -1,5 +1,6 @@
+import { connectCuffInstrument } from "../scene/connectCuffInstrument";
 import { Scene } from "@babylonjs/core/scene";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+import { Quaternion, Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { Color3 } from "@babylonjs/core/Maths/math.color";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { Mesh } from "@babylonjs/core/Meshes/mesh";
@@ -13,6 +14,7 @@ import { PointerEventTypes, PointerInfo } from "@babylonjs/core/Events/pointerEv
 import type { Observer } from "@babylonjs/core/Misc/observable";
 import type { Nullable } from "@babylonjs/core/types";
 import type { App } from "../App";
+import { splitSphygmomanometer } from "../scene/splitSphygmomanometer";
 import { auscultatoryScenario } from "../simulation/auscultatoryScenario";
 import { clinicalParameters, eligibleCuffs, requiredMaterials } from "../simulation/clinicalParameters";
 import type { ActionDefinition, CommunicationRecord, InteractionEvent, MeasurementRecord, SessionState, StepDefinition } from "../simulation/types";
@@ -70,6 +72,10 @@ export class InteractionManager {
 	private _xrPressureBoardDeflationControl: string | null = null;
 	private _xrPressureBoardLastPressure = Number.NaN;
 	private _sphygmomanometerPositioned = false;
+	private _instrumentControls: Mesh[] = [];
+	private _instrumentFeedback: { mesh: Mesh; rest: Vector3; rotation: Quaternion; startedAt: number } | null = null;
+	private _measurementStand: TransformNode | null = null;
+	private _cuffHoses: TransformNode | null = null;
 	private _xrDialogueTargets: Mesh[] = [];
 	private _dialogueTriggerRoot: TransformNode | null = null;
 	private _dialogueTriggerMesh: Mesh | null = null;
@@ -93,6 +99,7 @@ export class InteractionManager {
 		this._initDialogueTrigger();
 		this._initGuidanceHUD();
 		this._initPointerInteractions();
+		this._moveSphygmomanometerNearPatient();
 		this._updateGuidance();
 	}
 
@@ -197,6 +204,10 @@ export class InteractionManager {
 	private _applyAcceptedVisual(event: InteractionEvent): void {
 		const stethoscope = this._scene.getTransformNodeByName("stethoscope-root");
 		switch (event.type) {
+			case "cuff-removed":
+				this._scene.getMeshByName("fitted-cuff-sleeve")?.setEnabled(false);
+				this._cuffHoses?.setEnabled(false);
+				break;
 			case "earpieces-placed":
 				// The learner wears the earpieces; there is no learner avatar to render them on.
 				stethoscope?.setEnabled(false);
@@ -210,20 +221,88 @@ export class InteractionManager {
 		const sphygmomanometer = this._scene.getTransformNodeByName("sphygmo-root");
 		const arm = snapshot && this._scene.getMeshByName(`patient-forearm-${snapshot.config.arm}`);
 		if (!sphygmomanometer || !arm) return;
+		arm.computeWorldMatrix(true);
 
-		// Keep the gauge beside the forearm at arm height so it is reachable and
-		// readable without floating up near the patient's shoulder.
-		const destination = arm.getAbsolutePosition().addInPlace(new Vector3(0.35, 0.05, 0.10));
-		sphygmomanometer.position.copyFrom(destination);
-		const camera = this._scene.activeCamera;
-		if (camera) {
-			const facing = camera.globalPosition.subtract(destination);
-			facing.y = 0;
-			facing.normalize();
-			const yaw = Math.atan2(facing.x, facing.z);
-			sphygmomanometer.rotation.y = yaw;
-		}
+		// Place the model's visible bounds, rather than its offset GLB origin.
+		// The stand is forward of the supported arm, clear of the wrist approach.
+		const center = arm.getAbsolutePosition().add(new Vector3(0.25, -0.13, 0.14));
+		sphygmomanometer.rotation.y = 0;
+		sphygmomanometer.computeWorldMatrix(true);
+		const bounds = sphygmomanometer.getHierarchyBoundingVectors(true);
+		sphygmomanometer.position.addInPlace(new Vector3(
+			center.x - (bounds.min.x + bounds.max.x) / 2,
+			center.y - bounds.min.y,
+			center.z - (bounds.min.z + bounds.max.z) / 2,
+		));
+		sphygmomanometer.computeWorldMatrix(true);
+		const stand = new TransformNode("measurement-stand", this._scene);
+		stand.position.copyFrom(center);
+		const material = new StandardMaterial("measurement-stand-material", this._scene);
+		material.diffuseColor = Color3.FromHexString("#b9c7c7");
+		const top = CreateBox("measurement-stand-top", { width: 0.34, height: 0.025, depth: 0.30 }, this._scene);
+		top.parent = stand;
+		top.position.y = -0.014;
+		top.material = material;
+		top.isPickable = true;
+		top.metadata = { logicalTarget: "instrument-work-surface" };
+		const post = CreateCylinder("measurement-stand-post", { diameter: 0.035, height: center.y - 0.06 }, this._scene);
+		post.parent = stand;
+		post.position.y = -(center.y + 0.06) / 2;
+		post.material = material;
+		post.isPickable = false;
+		const foot = CreateCylinder("measurement-stand-foot", { diameter: 0.24, height: 0.025 }, this._scene);
+		foot.parent = stand;
+		foot.position.y = 0.025 - center.y;
+		foot.material = material;
+		foot.isPickable = false;
+		const readoutPost = CreateCylinder("measurement-readout-post", { diameter: 0.018, height: 0.276 }, this._scene);
+		readoutPost.parent = stand;
+		readoutPost.position.set(0, 0.138, -0.10);
+		readoutPost.material = material;
+		readoutPost.isPickable = false;
+		this._measurementStand = stand;
 		this._sphygmomanometerPositioned = true;
+		this._instrumentControls = splitSphygmomanometer(sphygmomanometer);
+		const cuff = this._scene.getMeshByName("fitted-cuff-sleeve");
+		if (cuff instanceof Mesh) this._cuffHoses = connectCuffInstrument(cuff, sphygmomanometer);
+	}
+
+	private _useInstrumentControl(target: string): boolean {
+		const action = this._app.getCurrentSimulationAction();
+		if (!action) return false;
+		let accepted = false;
+		if (target === "instrument-bulb") {
+			if (action.rule === "inflate" || action.rule === "inflate-stop") accepted = this._dispatchInflationIncrement();
+			else if (action.type === "pulse-disappeared") accepted = this.executeActiveActionFromScene();
+		} else {
+			if (["inflation-stopped", "deflation-started", "slow-deflation-performed", "estimation-air-released", "remaining-air-released"].includes(action.type)) {
+				accepted = this.executeActiveActionFromScene();
+				// Opening the valve after inflation both accepts the stopping
+				// point and starts the already configured controlled deflation.
+				if (accepted && action.type === "inflation-stopped" && this._app.getCurrentSimulationAction()?.type === "deflation-started") {
+					accepted = this.executeActiveActionFromScene();
+				}
+			} else if (this._app.isPressureDeflationActive()) {
+				this._app.togglePressureDeflation();
+				accepted = true;
+			}
+		}
+		if (accepted) {
+			const control = this._instrumentControls.find(mesh => mesh.metadata?.logicalTarget === target);
+			if (control) {
+				if (this._instrumentFeedback) {
+					this._instrumentFeedback.mesh.scaling.copyFrom(this._instrumentFeedback.rest);
+					this._instrumentFeedback.mesh.rotationQuaternion = this._instrumentFeedback.rotation.clone();
+				}
+				this._instrumentFeedback = {
+					mesh: control, rest: control.scaling.clone(),
+					rotation: control.rotationQuaternion?.clone() ?? Quaternion.FromEulerVector(control.rotation),
+					startedAt: performance.now(),
+				};
+				if (target === "instrument-bulb") control.scaling.y *= 0.65;
+			}
+		} else this._showFeedback("Este controle não está disponível nesta etapa. Aperte a pera para inflar; abra a válvula junto à mangueira da pera para desinflar, após atingir a faixa indicada.", false);
+		return accepted;
 	}
 
 	private _initTargetArrow(): void {
@@ -262,6 +341,14 @@ export class InteractionManager {
 			if (this._disposed) return;
 			time += 0.04;
 			this._updateVisualMotions();
+			if (this._instrumentFeedback) {
+				const { mesh, rest, rotation, startedAt } = this._instrumentFeedback;
+				const progress = Math.min(1, (performance.now() - startedAt) / 180);
+				if (mesh.metadata?.logicalTarget === "instrument-bulb") mesh.scaling.y = rest.y * (0.65 + 0.35 * progress);
+				else mesh.rotationQuaternion = rotation.multiply(Quaternion.RotationAxis(Vector3.Up(), 0.35 * (1 - progress)));
+				if (progress === 1) this._instrumentFeedback = null;
+			}
+			this._facePressureBoardToLearner();
 
 			if (this._arrowRoot) {
 				Vector3.LerpToRef(this._arrowRoot.position, this._targetLerpPosition, 0.12, this._arrowRoot.position);
@@ -270,7 +357,7 @@ export class InteractionManager {
 			}
 
 			if (this._dialogueTriggerRoot) {
-				this._dialogueTriggerRoot.position.y = 1.35 + Math.sin(time * 0.7) * 0.025;
+				this._dialogueTriggerRoot.position.y = 1.352 + Math.sin(time * 0.7) * 0.025;
 				const camera = this._scene.activeCamera;
 				if (camera) {
 					this._dialogueTriggerRoot.lookAt(camera.position, Math.PI);
@@ -387,21 +474,23 @@ export class InteractionManager {
 	private _positionXrPressureBoard(): void {
 		const root = this._xrPressureBoardRoot;
 		if (!root) return;
-		const patientRoot = this._scene.getTransformNodeByName("patient-root");
-		if (!patientRoot) return;
-		const leftArm = this._scene.getMeshByName("patient-forearm-esquerdo");
-		if (!leftArm) return;
-		const armPosition = leftArm.getAbsolutePosition();
-		const outward = armPosition.subtract(patientRoot.getAbsolutePosition());
-		outward.y = 0;
-		if (outward.lengthSquared() < 0.001) outward.set(1, 0, 0);
-		outward.normalize();
-		// Keep it close beside the left forearm, away from the approach to the
-		// right arm. The fixed front remains oriented toward the right-arm station.
-		root.position.copyFrom(armPosition)
-			.addInPlace(outward.scale(0.10))
-			.addInPlace(new Vector3(0, 0.25, 0));
-		root.rotation.y = 0;
+		const stand = this._measurementStand;
+		if (!stand) return;
+		root.scaling.setAll(0.32);
+		// Keep the complete panel above the back edge of the stand, not the arm.
+		root.position.copyFrom(stand.position).addInPlace(new Vector3(0, 0.34, -0.10));
+		this._facePressureBoardToLearner();
+	}
+
+	private _facePressureBoardToLearner(): void {
+		const root = this._xrPressureBoardRoot;
+		const camera = this._scene.activeCamera;
+		if (!root || !camera || !root.isEnabled()) return;
+		const direction = camera.globalPosition.subtract(root.position);
+		if (direction.x * direction.x + direction.z * direction.z > 0.01) {
+			// The readable plane faces local -Z. Rotate the frame with it.
+			root.rotation.y = Math.atan2(-direction.x, -direction.z);
+		}
 	}
 
 	private _renderXrPressureBoard(pressure: number): void {
@@ -541,7 +630,8 @@ export class InteractionManager {
 
 	private _initDialogueTrigger(): void {
 		const triggerRoot = new TransformNode("patient-dialogue-trigger-root", this._scene);
-		triggerRoot.position.set(-0.80, 1.35, -1.15);
+		const patient = this._scene.getTransformNodeByName("patient-root");
+		triggerRoot.position.copyFrom(patient?.getAbsolutePosition() ?? Vector3.Zero()).addInPlace(new Vector3(0.18, 1.02, 0.40));
 
 		const disc = CreateCylinder("patient-dialogue-trigger", {
 			diameter: 0.22,
@@ -566,16 +656,39 @@ export class InteractionManager {
 	private _initPointerInteractions(): void {
 		this._pointerObserver = this._scene.onPointerObservable.add((pointerInfo: PointerInfo) => {
 			if (this._disposed) return;
-			if (pointerInfo.type !== PointerEventTypes.POINTERPICK) return;
+			const doubleTap = pointerInfo.type === PointerEventTypes.POINTERDOUBLETAP;
+			if (pointerInfo.type !== PointerEventTypes.POINTERPICK && !doubleTap) return;
 			const mesh = pointerInfo.pickInfo?.pickedMesh as Mesh | undefined;
 			if (!mesh) return;
 
+			// The valve is small and its tube belongs to the surrounding mesh.
+			// Accept a narrow margin on the real parts, without visible proxy controls.
+			const point = pointerInfo.pickInfo?.pickedPoint;
+			const logicalTarget = mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name);
+			// A rapid second press is a double tap rather than POINTERPICK.
+			// Count it for pressure controls only; confirmations keep single-click semantics.
+			if (doubleTap && !["instrument-bulb", "instrument-valve", "inflate-action", "gauge", "instrument-work-surface"].includes(logicalTarget)) return;
+			if (point && ["gauge", "instrument-work-surface"].includes(logicalTarget)) {
+				const nearby = this._instrumentControls.map(part => {
+					part.computeWorldMatrix(true);
+					const box = part.getBoundingInfo().boundingBox;
+					const closest = Vector3.Clamp(point, box.minimumWorld, box.maximumWorld);
+					return { part, distance: Vector3.Distance(point, closest), centerDistance: Vector3.Distance(point, box.centerWorld) };
+				}).filter(candidate => candidate.distance <= 0.012)
+					.sort((a, b) => a.centerDistance - b.centerDistance)[0];
+				if (nearby) {
+					this.handleMeshInteraction(nearby.part);
+					return;
+				}
+			}
+			if (doubleTap && ["gauge", "instrument-work-surface"].includes(logicalTarget)) return;
 			this.handleMeshInteraction(mesh);
 		});
 	}
 
 	public handleMeshInteraction(mesh: Mesh): boolean {
 		const logicalTarget = mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name);
+		if (logicalTarget === "instrument-bulb" || logicalTarget === "instrument-valve") return this._useInstrumentControl(logicalTarget);
 		if (logicalTarget === "dialogue-topic") {
 			if (!this._dialogueOpen) return false;
 			const topicId = mesh.metadata?.topicId as "identify-patient" | "check-readiness" | "explain-and-rest" | "inform-patient" | undefined;
@@ -602,7 +715,7 @@ export class InteractionManager {
 		const currentAction = this._app.getCurrentSimulationAction();
 		if (!snapshot || !currentAction) return false;
 		if (currentAction.rule === "inflate" || currentAction.rule === "inflate-stop") {
-			this._showFeedback("Use os botões de pressão no painel para inflar ou iniciar a deflação.", false);
+			this._showFeedback("Aperte a pera para inflar; use a válvula para iniciar a deflação. Os botões do painel também estão disponíveis.", false);
 			return false;
 		}
 
@@ -686,7 +799,7 @@ export class InteractionManager {
 			}
 			case "patient": {
 				const patient = this._scene.getTransformNodeByName("patient-root");
-				if (patient) return patient.position.clone().addInPlace(new Vector3(0, 0.85, 0));
+				if (patient) return patient.getAbsolutePosition().clone().addInPlace(new Vector3(0, 0.85, 0));
 				break;
 			}
 			case "dialogue-trigger": {
@@ -720,7 +833,10 @@ export class InteractionManager {
 			}
 			case "gauge": {
 				const sphygmo = this._scene.getTransformNodeByName("sphygmo-root");
-				if (sphygmo) return sphygmo.position.clone().addInPlace(new Vector3(0, 0.22, 0));
+				if (sphygmo) {
+					const bounds = sphygmo.getHierarchyBoundingVectors(true);
+					return new Vector3((bounds.min.x + bounds.max.x) / 2, bounds.max.y + 0.08, (bounds.min.z + bounds.max.z) / 2);
+				}
 				break;
 			}
 			case "record": {
@@ -877,6 +993,12 @@ export class InteractionManager {
 	}
 
 	public handleHandGrabInteraction(position: Vector3): boolean {
+		// One action per open-to-closed transition; controls require a close reach.
+		const control = this._instrumentControls
+			.filter(mesh => mesh.isEnabled())
+			.map(mesh => ({ mesh, distance: Vector3.Distance(position, mesh.getBoundingInfo().boundingBox.centerWorld) }))
+			.sort((a, b) => a.distance - b.distance)[0];
+		if (control && control.distance <= 0.075) return this.handleMeshInteraction(control.mesh);
 		const action = this._app.getCurrentSimulationAction();
 		if (!action || action.type === "earpieces-placed"
 			|| action.rule === "inflate" || action.rule === "inflate-stop" || action.rule === "deflation") return false;
@@ -886,11 +1008,11 @@ export class InteractionManager {
 
 		const targetMesh = this._scene.meshes.find(mesh =>
 			(mesh.metadata?.logicalTarget ?? this._resolveLogicalTarget(mesh.name)) === action.target
-			&& mesh.isPickable
+			&& mesh instanceof Mesh && mesh.isPickable
 		);
 		if (!targetMesh) return false;
 
-		return this.handleMeshInteraction(targetMesh);
+		return this.handleMeshInteraction(targetMesh as Mesh);
 	}
 
 	public handleStethoscopeRelease(position: Vector3): boolean {
@@ -1071,9 +1193,9 @@ export class InteractionManager {
 		` : "";
 		const pressureBoardActive = pressureInteractionSteps.includes(step.id);
 		this._xrPressureBoardActive = pressureBoardActive;
-		this._xrPressureBoardRoot?.setEnabled(true);
+		this._xrPressureBoardRoot?.setEnabled(pressureBoardActive);
 		this._xrPressureBoardInstruction = pressureBoardActive
-			? action.prompt
+			? `${action.prompt} Pera: inflar. Válvula: desinflar/pausar.`
 			: "Acompanhe a leitura do manguito durante a medição.";
 		if (pressureBoardActive) {
 			this._positionXrPressureBoard();
@@ -1112,6 +1234,7 @@ export class InteractionManager {
 			<p class="step-detail">${action.prompt}</p>
 
 			${pressureHtml}
+			${this._sphygmomanometerPositioned && (pressureInteractionSteps.includes(step.id) || step.id === "estimate-systolic") ? `<p class="step-detail">Clique na pera de borracha para inflar (+10 mmHg), ou feche e abra a mão sobre ela. Clique na pequena válvula entre a pera e a mangueira para iniciar, pausar ou retomar a deflação. O mostrador circular serve para ler a pressão.</p>` : ""}
 			${firstSoundHint}
 			${inflationHtml}
 			${deflationControlHtml}
@@ -1435,7 +1558,7 @@ export class InteractionManager {
 		if (pressureBoardActive) {
 			ctx.fillStyle = "#80DEEA";
 			ctx.font = "italic 26px 'Segoe UI', Arial, sans-serif";
-			ctx.fillText("Use o quadro de pressão ao lado do paciente para interagir.", 40, 440);
+			ctx.fillText("Aperte a pera do aparelho para inflar; use a válvula para desinflar.", 40, 440);
 		} else if (canInflate) {
 			ctx.fillStyle = "#08765A";
 			ctx.beginPath();
@@ -1702,6 +1825,13 @@ export class InteractionManager {
 		}
 		this._guidanceCard?.remove();
 		this._guidanceCard = null;
+		this._instrumentFeedback = null;
+		this._instrumentControls.forEach(control => control.dispose());
+		this._instrumentControls = [];
+		this._measurementStand?.dispose(false, true);
+		this._measurementStand = null;
+		this._cuffHoses?.dispose(false, true);
+		this._cuffHoses = null;
 		this._arrowRoot?.dispose();
 		this._arrowRoot = null;
 		this._dialogueTriggerMesh?.dispose();

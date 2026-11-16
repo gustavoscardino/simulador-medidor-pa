@@ -63,11 +63,11 @@ test("persistent sounds branch occurs during deflation and records three values"
 });
 
 const caseExpectations = {
-	"ana-standard": { cuff: "adult", systolic: 118, diastolic: 66, arm: "esquerdo", zero: undefined },
+	"ana-standard": { cuff: "adult", systolic: 118, diastolic: 66, arm: "direito", zero: undefined },
 	"bruno-large-cuff": { cuff: "large-adult", systolic: 158, diastolic: 94, arm: "direito", zero: undefined },
-	"clara-small-cuff": { cuff: "small-adult", systolic: 96, diastolic: 58, arm: "esquerdo", zero: undefined },
+	"clara-small-cuff": { cuff: "small-adult", systolic: 96, diastolic: 58, arm: "direito", zero: undefined },
 	"diego-persistent": { cuff: "adult", systolic: 126, diastolic: 72, arm: "direito", zero: 0 },
-	"elisa-infant-cuff": { cuff: "infant", systolic: 110, diastolic: 70, arm: "esquerdo", zero: undefined },
+	"elisa-infant-cuff": { cuff: "infant", systolic: 110, diastolic: 70, arm: "direito", zero: undefined },
 };
 for (const patientCase of patientCases) {
 	test(`${patientCase.id}: completes with its own identity, cuff, pressure, arm and branch`, () => {
@@ -242,7 +242,7 @@ test("final documentation is mandatory and exact readings and metadata are valid
 	until(context, "measurement-documented");
 	assert.equal(context.controller.getSnapshot().completed, false);
 	const event = nextMockEvent(context.controller, context.clock);
-	for (const change of [{ systolic: 120 }, { professional: "" }, { performed: false }, { arm: "direito" }, { dateTime: "invalid" }, { position: "deitado" }]) {
+	for (const change of [{ systolic: 120 }, { professional: "" }, { performed: false }, { arm: "esquerdo" }, { dateTime: "invalid" }, { position: "deitado" }]) {
 		assert.equal(context.controller.dispatch({ ...event, value: { ...event.value, ...change } }).accepted, false);
 	}
 	assert.equal(context.controller.dispatch(event).accepted, true);

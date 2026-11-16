@@ -1,3 +1,4 @@
+import { clinicalStations } from "../scene/workstationLayout";
 import { Scene } from "@babylonjs/core/scene";
 import { Vector3 } from "@babylonjs/core/Maths/math.vector";
 import { WebXRDefaultExperience } from "@babylonjs/core/XR/webXRDefaultExperience";
@@ -71,9 +72,9 @@ export default class XR {
                 console.warn("XR: Movement feature not available:", movementError);
             }
 
-            // Spawn in the center of the doctor's office looking towards the counter
-            const initialSpawnPosition = new Vector3(0, 0, 0.5);
-            const initialTarget = new Vector3(0, 1.1, -1.8);
+            // Start at the shared preparation/measurement working position.
+            const initialSpawnPosition = new Vector3(clinicalStations.direito.pos[0], 0, clinicalStations.direito.pos[2]);
+            const initialTarget = new Vector3(...clinicalStations.direito.lookAt);
 
             xr.baseExperience.onInitialXRPoseSetObservable.add((camera) => {
                 camera.position.copyFrom(initialSpawnPosition);
@@ -99,12 +100,14 @@ export default class XR {
 
             // Add snap points for the key clinical stations for teleportation
             if (xr.teleportation) {
-                xr.teleportation.addSnapPoint(new Vector3(0, 0, 0.5));        // 1: Visão geral
-                xr.teleportation.addSnapPoint(new Vector3(0.79, 0, -1.6));    // 2: Estação de higiene (dispensador)
-                xr.teleportation.addSnapPoint(new Vector3(-0.07, 0, -1.3));   // 3: Prontuário / Balcão
-                xr.teleportation.addSnapPoint(new Vector3(-1.50, 0, -0.50));  // 4: Mesa & Instrumentos
-                xr.teleportation.addSnapPoint(new Vector3(0.05, 0, -0.55));   // Aproximação pelo braço esquerdo
-                xr.teleportation.addSnapPoint(new Vector3(-0.18, 0, -1.82));  // Aproximação pelo braço direito
+                const snapPoints = new Set<string>();
+                for (const station of Object.values(clinicalStations)) {
+                    const [x, , z] = station.pos;
+                    const key = `${x},${z}`;
+                    if (snapPoints.has(key)) continue;
+                    snapPoints.add(key);
+                    xr.teleportation.addSnapPoint(new Vector3(x, 0, z));
+                }
                 this._fixHandTeleportation(xr);
             }
 
@@ -208,7 +211,13 @@ export default class XR {
                             }
                         }
                         if (!pickedUpStethoscope && wrist) {
-                            this._onHandGrab?.(wrist.getAbsolutePosition());
+                            const knuckle = hand.getJointMesh(WebXRHandJoint.MIDDLE_FINGER_PHALANX_PROXIMAL);
+                            // Use the palm for direct instrument contact; the wrist
+                            // sits behind the bulb/valve when the hand closes on it.
+                            const grabPosition = knuckle
+                                ? Vector3.Lerp(wrist.getAbsolutePosition(), knuckle.getAbsolutePosition(), 0.65)
+                                : wrist.getAbsolutePosition();
+                            this._onHandGrab?.(grabPosition);
                         }
                     } else if (wasFistGrabbing && fistRelease) {
                         wasFistGrabbing = false;
@@ -291,7 +300,7 @@ export default class XR {
                         );
 
                         if (
-                            grabbingHand === handedness
+                            grabbingHand === handedness && box
                         ) {
                             const releasePosition = thumbPosition
                                 .add(indexPosition)
